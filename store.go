@@ -35,12 +35,31 @@ type Record struct {
 	AnswerModel      string      `json:"answer_model"`
 	CaptionModel     string      `json:"caption_model"`
 	Vision           bool        `json:"vision"`
+	AgentError       string      `json:"agent_error,omitempty"`
 	TotalTimeMS      int64       `json:"total_time_ms"`
+	Calls            []ModelCall `json:"calls,omitempty"`
+}
+
+// ModelCall 是一次模型调用的用量记录。
+type ModelCall struct {
+	ID               int64  `json:"id"`
+	RecordID         int64  `json:"record_id"`
+	Slot             string `json:"slot"`
+	Vendor           string `json:"vendor"`
+	Protocol         string `json:"protocol"`
+	Model            string `json:"model"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	LatencyMS        int64  `json:"latency_ms"`
+	Status           string `json:"status"`
+	Error            string `json:"error,omitempty"`
+	Timestamp        string `json:"timestamp"`
 }
 
 type Store struct{ db *sql.DB }
 
-const recordColumns = "id, timestamp, type, status, raw_title, raw_options, processed_title, processed_options, images, final_prompt, reasoning, raw_content, answer, answer_model, caption_model, vision, total_time_ms"
+const recordColumns = "id, timestamp, type, status, raw_title, raw_options, processed_title, processed_options, images, final_prompt, reasoning, raw_content, answer, answer_model, caption_model, vision, agent_error, total_time_ms"
 
 func openStore(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", filepath.ToSlash(path))
@@ -55,7 +74,13 @@ func openStore(path string) (*Store, error) {
 		processed_title TEXT DEFAULT '', processed_options TEXT DEFAULT '', images TEXT DEFAULT '[]',
 		final_prompt TEXT DEFAULT '', reasoning TEXT DEFAULT '', raw_content TEXT DEFAULT '',
 		answer TEXT DEFAULT '', answer_model TEXT DEFAULT '', caption_model TEXT DEFAULT '',
-		vision INTEGER DEFAULT 0, total_time_ms INTEGER DEFAULT 0);`); err != nil {
+		vision INTEGER DEFAULT 0, agent_error TEXT DEFAULT '', total_time_ms INTEGER DEFAULT 0);
+		CREATE TABLE IF NOT EXISTS model_calls (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, slot TEXT DEFAULT '',
+		vendor TEXT DEFAULT '', protocol TEXT DEFAULT '', model TEXT DEFAULT '',
+		prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, total_tokens INTEGER DEFAULT 0,
+		latency_ms INTEGER DEFAULT 0, status TEXT DEFAULT 'ok', error TEXT DEFAULT '', timestamp TEXT DEFAULT '');
+		CREATE INDEX IF NOT EXISTS idx_model_calls_record ON model_calls(record_id);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -107,6 +132,12 @@ func openStore(path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	if !cols["agent_error"] {
+		if _, err = db.Exec("ALTER TABLE records ADD COLUMN agent_error TEXT DEFAULT ''"); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if !cols["status"] {
 		if _, err = db.Exec("UPDATE records SET status='complete' WHERE status='' OR status IS NULL"); err != nil {
 			db.Close()
@@ -117,6 +148,36 @@ func openStore(path string) (*Store, error) {
 }
 
 func (s *Store) close() error { return s.db.Close() }
+
+// addModelCall 写入一次模型调用的用量记录。
+func (s *Store) addModelCall(ctx context.Context, call ModelCall) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO model_calls (record_id, slot, vendor, protocol, model,
+		prompt_tokens, completion_tokens, total_tokens, latency_ms, status, error, timestamp)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, call.RecordID, call.Slot, call.Vendor, call.Protocol, call.Model,
+		call.PromptTokens, call.CompletionTokens, call.TotalTokens, call.LatencyMS, call.Status, call.Error, call.Timestamp)
+	return err
+}
+
+// modelCalls 返回一条答题记录的全部模型调用。
+func (s *Store) modelCalls(ctx context.Context, recordID int64) ([]ModelCall, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, record_id, slot, vendor, protocol, model, prompt_tokens,
+		completion_tokens, total_tokens, latency_ms, status, error, timestamp FROM model_calls WHERE record_id=? ORDER BY id`, recordID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []ModelCall{}
+	for rows.Next() {
+		var call ModelCall
+		if err = rows.Scan(&call.ID, &call.RecordID, &call.Slot, &call.Vendor, &call.Protocol, &call.Model,
+			&call.PromptTokens, &call.CompletionTokens, &call.TotalTokens, &call.LatencyMS,
+			&call.Status, &call.Error, &call.Timestamp); err != nil {
+			return nil, err
+		}
+		result = append(result, call)
+	}
+	return result, rows.Err()
+}
 
 func (s *Store) pending(ctx context.Context, kind string) (int64, error) {
 	r, err := s.db.ExecContext(ctx, "INSERT INTO records (timestamp, type, status) VALUES (?, ?, 'pending')", time.Now().Format("2006-01-02T15:04:05.000000"), kind)
@@ -133,9 +194,9 @@ func (s *Store) complete(ctx context.Context, r Record) error {
 	}
 	_, err = s.db.ExecContext(ctx, `UPDATE records SET timestamp=?, type=?, status='complete', raw_title=?, raw_options=?,
 		processed_title=?, processed_options=?, images=?, final_prompt=?, reasoning=?, raw_content=?, answer=?,
-		answer_model=?, caption_model=?, vision=?, total_time_ms=? WHERE id=?`, r.Timestamp, r.Type, r.RawTitle, r.RawOptions,
+		answer_model=?, caption_model=?, vision=?, agent_error=?, total_time_ms=? WHERE id=?`, r.Timestamp, r.Type, r.RawTitle, r.RawOptions,
 		r.ProcessedTitle, r.ProcessedOptions, string(images), r.FinalPrompt, r.Reasoning, r.RawContent,
-		r.Answer, r.AnswerModel, r.CaptionModel, r.Vision, r.TotalTimeMS, r.ID)
+		r.Answer, r.AnswerModel, r.CaptionModel, r.Vision, r.AgentError, r.TotalTimeMS, r.ID)
 	return err
 }
 
@@ -144,7 +205,7 @@ func scanRecord(row interface{ Scan(...any) error }) (Record, error) {
 	var images string
 	err := row.Scan(&r.ID, &r.Timestamp, &r.Type, &r.Status, &r.RawTitle, &r.RawOptions, &r.ProcessedTitle,
 		&r.ProcessedOptions, &images, &r.FinalPrompt, &r.Reasoning, &r.RawContent, &r.Answer, &r.AnswerModel,
-		&r.CaptionModel, &r.Vision, &r.TotalTimeMS)
+		&r.CaptionModel, &r.Vision, &r.AgentError, &r.TotalTimeMS)
 	if err != nil {
 		return r, err
 	}
@@ -184,6 +245,25 @@ func (s *Store) count(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// search 按关键词检索已成功作答的历史记录，供 Agent 工具使用。
+func (s *Store) search(ctx context.Context, keyword string, limit int) ([]Record, error) {
+	pattern := "%" + keyword + "%"
+	rows, err := s.db.QueryContext(ctx, "SELECT "+recordColumns+" FROM records WHERE status='complete' AND answer NOT LIKE 'ERROR%' AND (raw_title LIKE ? OR processed_title LIKE ?) ORDER BY id DESC LIMIT ?", pattern, pattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Record{}
+	for rows.Next() {
+		record, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, record)
+	}
+	return result, rows.Err()
+}
+
 type Stats struct {
 	Total        int    `json:"total"`
 	Today        int    `json:"today"`
@@ -191,6 +271,8 @@ type Stats struct {
 	SuccessRate  int    `json:"success_rate"`
 	AnswerModel  string `json:"answer_model"`
 	CaptionModel string `json:"caption_model"`
+	TodayTokens  int64  `json:"today_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
 }
 
 func (s *Store) stats(ctx context.Context) (Stats, error) {
@@ -217,6 +299,11 @@ func (s *Store) stats(ctx context.Context) (Stats, error) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return v, err
 		}
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(total_tokens),0),
+		COALESCE(SUM(CASE WHEN substr(timestamp,1,10)=? THEN total_tokens ELSE 0 END),0) FROM model_calls`, today).
+		Scan(&v.TotalTokens, &v.TodayTokens); err != nil {
+		return v, err
 	}
 	return v, nil
 }

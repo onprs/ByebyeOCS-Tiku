@@ -237,10 +237,7 @@ func extractImageURLs(text string) []string {
 
 // captionTask 描述图片转述任务：使用转述模型把图片转换为文字。
 type captionTask struct {
-	prompt  string
-	service ServiceConfig
-	model   ModelConfig
-	client  *ModelClient
+	run func(ctx context.Context, data []byte) (string, error)
 }
 
 // process 处理题目中的图片。直传模式下保留原图数据交给回答模型；
@@ -271,7 +268,7 @@ func (p *ImageProcessor) process(ctx context.Context, title, options string, cap
 			if direct {
 				info.Description = "已下载"
 			} else {
-				info.Description, err = caption.client.describe(ctx, caption.service, caption.model, caption.prompt, data)
+				info.Description, err = caption.run(ctx, data)
 				info.Description = strings.TrimSpace(info.Description)
 				if err == nil && info.Description == "" {
 					err = errors.New("未识别")

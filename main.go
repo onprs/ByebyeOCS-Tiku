@@ -71,7 +71,7 @@ func main() {
 	}
 	models := newModelClient()
 	server := &Server{config: config, store: store, models: models, catalog: modelCatalog,
-		solver: &Solver{config: config, models: models, images: images, catalog: modelCatalog},
+		solver: &Solver{config: config, models: models, images: images, catalog: modelCatalog, store: store},
 		assets: *frontendDir, imageDir: images.dir, address: address}
 	go refreshModels(modelCatalog)
 	log.Printf("OCS 题库服务: http://%s", address)

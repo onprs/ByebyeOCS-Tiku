@@ -25,6 +25,7 @@ type Solver struct {
 	models  *ModelClient
 	images  *ImageProcessor
 	catalog *catalog.Store
+	store   *Store
 }
 
 func questionLabel(kind string) string {
@@ -174,6 +175,7 @@ func replaceURLs(text string) string {
 
 // solve 完成一次答题。图片路径由回答模型的视觉能力决定：
 // 具备视觉能力时图片直接交给回答模型，否则交给图片转述模型转为文字。
+// 开启 Agent 模式且模型支持工具调用时，由 agent 分步推理，失败时回退到普通作答。
 func (s *Solver) solve(ctx context.Context, title, options, kind string) (result Record, solveErr error) {
 	cfg := s.config.snapshot()
 	start := time.Now()
@@ -192,7 +194,11 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 
 	var caption *captionTask
 	if cfg.Answer.Caption.Model != "" {
-		caption = &captionTask{prompt: cfg.Answer.CaptionPrompt, service: captionService, model: cfg.Answer.Caption, client: s.models}
+		captionModel := cfg.Answer.Caption
+		caption = &captionTask{run: func(callCtx context.Context, data []byte) (string, error) {
+			describeCtx := s.modelContext(callCtx, "caption", captionService, captionModel)
+			return s.models.describe(describeCtx, captionService, captionModel, cfg.Answer.CaptionPrompt, data)
+		}}
 	}
 	processedTitle, processedOptions, infos, images, err := s.images.process(ctx, title, options, caption, direct)
 	result.ProcessedTitle, result.ProcessedOptions, result.Images = processedTitle, processedOptions, infos
@@ -201,23 +207,45 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 		return result, err
 	}
 
-	var content, reasoning string
+	var userContent any
 	if direct {
 		result.FinalPrompt = buildPrompt(title, options, kind)
 		if len(images) > 0 {
 			result.FinalPrompt += fmt.Sprintf("\n[图片直传: 含 %d 张原图]", len(images))
 		}
-		content, reasoning, err = s.models.chat(ctx, answerService, cfg.Answer.Answer,
-			[]chatMessage{{Role: "system", Content: cfg.Answer.SystemPrompt}, {Role: "user", Content: directContent(title, options, kind, images)}}, 0.1, 0)
+		userContent = directContent(title, options, kind, images)
 	} else {
 		result.FinalPrompt = buildPrompt(processedTitle, processedOptions, kind)
-		content, reasoning, err = s.models.chat(ctx, answerService, cfg.Answer.Answer,
-			[]chatMessage{{Role: "system", Content: cfg.Answer.SystemPrompt}, {Role: "user", Content: result.FinalPrompt}}, 0.1, 0)
+		userContent = result.FinalPrompt
 	}
-	result.RawContent, result.Reasoning = content, reasoning
-	if err != nil {
-		result.Answer = "ERROR: " + err.Error()
-		return result, err
+	prompt := []chatMessage{
+		{Role: "system", Content: cfg.Answer.SystemPrompt},
+		{Role: "user", Content: userContent},
+	}
+
+	var content, reasoning string
+	if cfg.Answer.Agent.Enabled {
+		if !capability.ToolCall {
+			result.AgentError = "回答模型未标注工具调用能力，已按普通方式作答"
+		} else {
+			agentCtx := s.modelContext(ctx, "agent", answerService, cfg.Answer.Answer)
+			content, err = s.runAgent(agentCtx, cfg, answerService, []chatMessage{{Role: "user", Content: userContent}})
+			if err != nil {
+				result.AgentError = "Agent 作答失败，已回退：" + err.Error()
+				content = ""
+			}
+		}
+	}
+	if content == "" {
+		answerCtx := s.modelContext(ctx, "answer", answerService, cfg.Answer.Answer)
+		content, reasoning, err = s.models.chat(answerCtx, answerService, cfg.Answer.Answer, prompt, 0.1, 0)
+		result.RawContent, result.Reasoning = content, reasoning
+		if err != nil {
+			result.Answer = "ERROR: " + err.Error()
+			return result, err
+		}
+	} else {
+		result.RawContent = content
 	}
 	result.Answer = extractAnswer(content, reasoning, kind)
 	return result, nil

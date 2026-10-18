@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import useSWR from 'swr';
-import { Activity, Database, CheckCircle, TrendingUp, ChevronDown, Copy } from 'lucide-react';
+import { Activity, Database, CheckCircle, TrendingUp, ChevronDown, Copy, Coins } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { fetcher } from '@/lib/api';
@@ -60,7 +60,7 @@ export default function Dashboard() {
         <p className="text-muted-foreground mt-1 text-sm">这里是 OCS 题库的运行概览与大模型解析数据统计。</p>
       </motion.div>
 
-      <motion.div variants={containerVariants} initial={false} animate="show" className="grid gap-6 md:grid-cols-3">
+      <motion.div variants={containerVariants} initial={false} animate="show" className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
         <motion.div variants={itemVariants}>
           <Card className="glass relative overflow-hidden group hover:shadow-lg transition-all duration-300 hover:-translate-y-1">
             <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-bl-full -mr-16 -mt-16 transition-transform group-hover:scale-110 duration-500"></div>
@@ -133,6 +133,29 @@ export default function Dashboard() {
                 <p className="text-xs text-destructive mt-2">数据加载失败</p>
               ) : (
                 <p className="text-xs text-muted-foreground mt-2">基于大语言模型智能提取</p>
+              )}
+            </CardContent>
+          </Card>
+        </motion.div>
+        <motion.div variants={itemVariants}>
+          <Card className="glass relative overflow-hidden group hover:shadow-lg transition-all duration-300 hover:-translate-y-1">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-amber-500/10 rounded-bl-full -mr-16 -mt-16 transition-transform group-hover:scale-110 duration-500"></div>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 relative z-10">
+              <CardTitle className="text-sm font-semibold text-muted-foreground">今日 Token 用量</CardTitle>
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-amber-100 to-amber-200 dark:from-amber-900/40 dark:to-amber-800/40 flex items-center justify-center shadow-inner">
+                <Coins className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+              </div>
+            </CardHeader>
+            <CardContent className="relative z-10">
+              <div className="text-4xl font-extrabold text-foreground tracking-tight">
+                {statsLoading ? '-' : (
+                  <span>{(stats?.today_tokens ?? 0).toLocaleString()}</span>
+                )}
+              </div>
+              {statsError ? (
+                <p className="text-xs text-destructive mt-2">数据加载失败</p>
+              ) : (
+                <p className="text-xs text-muted-foreground mt-2">累计 {(stats?.total_tokens ?? 0).toLocaleString()} tokens</p>
               )}
             </CardContent>
           </Card>

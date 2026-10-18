@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/onprs/OCS-Tiku/internal/catalog"
@@ -53,7 +54,7 @@ func setupServer(t *testing.T) (*Server, *httptest.Server, string) {
 	models := newModelClient()
 	s := &Server{config: cfg, store: store, models: models, catalog: modelCatalog,
 		assets: assets, imageDir: images.dir}
-	s.solver = &Solver{config: cfg, models: models, images: images, catalog: modelCatalog}
+	s.solver = &Solver{config: cfg, models: models, images: images, catalog: modelCatalog, store: store}
 	web := httptest.NewServer(s.handler())
 	t.Cleanup(web.Close)
 	return s, web, dir
@@ -448,3 +449,232 @@ func TestBlockedImageTargets(t *testing.T) {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+// usageMockServer 返回带用量字段的模型响应。
+func usageMockServer(t *testing.T, content string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload := map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": content}, "finish_reason": "stop"}},
+			"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+		}
+		json.NewEncoder(w).Encode(payload)
+	}))
+}
+
+func TestModelCallUsage(t *testing.T) {
+	s, web, _ := setupServer(t)
+	fake := usageMockServer(t, "<answer>A</answer>")
+	defer fake.Close()
+	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL, APIKey: "demo"},
+		ModelConfig{Model: "usage-model", Vision: CapabilityAuto, ToolCall: CapabilityAuto})
+
+	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "统计题目", "options": "A. 一\nB. 二", "type": "single"}, 200, nil)
+
+	var item Record
+	requestJSON(t, web, "GET", "/api/records/1", nil, 200, &item)
+	if len(item.Calls) != 1 {
+		t.Fatalf("调用记录数 = %d，期望 1：%+v", len(item.Calls), item.Calls)
+	}
+	call := item.Calls[0]
+	if call.Slot != "answer" || call.TotalTokens != 15 || call.PromptTokens != 10 || call.CompletionTokens != 5 || call.Status != "ok" {
+		t.Fatalf("调用记录异常: %+v", call)
+	}
+	if call.Model != "usage-model" {
+		t.Fatalf("模型标识异常: %+v", call)
+	}
+	var stats Stats
+	requestJSON(t, web, "GET", "/api/stats", nil, 200, &stats)
+	if stats.TotalTokens != 15 || stats.TodayTokens != 15 {
+		t.Fatalf("用量统计异常: %+v", stats)
+	}
+}
+
+// TestFailedCallUsage 校验失败调用也会被记录。
+func TestFailedCallUsage(t *testing.T) {
+	s, web, _ := setupServer(t)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"error":{"message":"Invalid API key"}}`))
+	}))
+	defer fake.Close()
+	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL, APIKey: "bad"},
+		ModelConfig{Model: "fail-model", Vision: CapabilityAuto, ToolCall: CapabilityAuto})
+	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "失败题目"}, 500, nil)
+	var item Record
+	requestJSON(t, web, "GET", "/api/records/1", nil, 200, &item)
+	if len(item.Calls) != 1 || item.Calls[0].Status != "error" || item.Calls[0].Error == "" {
+		t.Fatalf("失败调用未记录: %+v", item.Calls)
+	}
+}
+
+// agentMockServer 模拟两轮 ReAct：先请求工具，再给出最终答案。
+func agentMockServer(t *testing.T, rounds *int32, final string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]any `json:"messages"`
+			Tools    []any            `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		toolResult := false
+		for _, message := range body.Messages {
+			if message["role"] == "tool" {
+				toolResult = true
+			}
+		}
+		atomic.AddInt32(rounds, 1)
+		var message map[string]any
+		reason := "stop"
+		if toolResult || len(body.Tools) == 0 {
+			message = map[string]any{"role": "assistant", "content": final}
+		} else {
+			reason = "tool_calls"
+			message = map[string]any{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{
+				"id": "call_1", "type": "function",
+				"function": map[string]string{"name": "lookup_history", "arguments": `{"query":"函数"}`},
+			}}}
+		}
+		payload := map[string]any{
+			"choices": []any{map[string]any{"message": message, "finish_reason": reason}},
+			"usage":   map[string]int{"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+		}
+		json.NewEncoder(w).Encode(payload)
+	}))
+}
+
+func TestAgentMode(t *testing.T) {
+	s, web, _ := setupServer(t)
+	var rounds int32
+	fake := agentMockServer(t, &rounds, "<answer>D</answer>")
+	defer fake.Close()
+	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL, APIKey: "demo"},
+		ModelConfig{Model: "agent-model", Vision: CapabilityAuto, ToolCall: CapabilityOn})
+	answer := s.config.snapshot().Answer
+	answer.Agent = AgentConfig{Enabled: true, MaxIterations: 4}
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+
+	var result struct{ Question, Answer string }
+	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "函数题目", "options": "A. 一\nB. 二", "type": "single"}, 200, &result)
+	if result.Answer != "D" {
+		t.Fatalf("Agent 作答异常: %+v", result)
+	}
+	if atomic.LoadInt32(&rounds) < 2 {
+		t.Fatalf("Agent 未进行多轮调用: %d", rounds)
+	}
+	var item Record
+	requestJSON(t, web, "GET", "/api/records/1", nil, 200, &item)
+	if item.AgentError != "" {
+		t.Fatalf("Agent 不应报错: %s", item.AgentError)
+	}
+	if len(item.Calls) < 2 {
+		t.Fatalf("Agent 调用未统计: %+v", item.Calls)
+	}
+	if item.Calls[0].Slot != "agent" {
+		t.Fatalf("调用归属异常: %+v", item.Calls[0])
+	}
+}
+
+// TestAgentFallback 校验 Agent 失败时回退到普通作答。
+func TestAgentFallback(t *testing.T) {
+	s, web, _ := setupServer(t)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]any `json:"messages"`
+			Tools    []any            `json:"tools"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Tools) > 0 {
+			// Agent 请求失败，普通请求成功。
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"error":{"message":"tool calling unsupported"}}`))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "<answer>B</answer>"}, "finish_reason": "stop"}},
+		})
+	}))
+	defer fake.Close()
+	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL, APIKey: "demo"},
+		ModelConfig{Model: "fallback-model", Vision: CapabilityAuto, ToolCall: CapabilityOn})
+	answer := s.config.snapshot().Answer
+	answer.Agent = AgentConfig{Enabled: true, MaxIterations: 3}
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	var result struct{ Question, Answer string }
+	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "回退题目"}, 200, &result)
+	if result.Answer != "B" {
+		t.Fatalf("回退作答异常: %+v", result)
+	}
+	var item Record
+	requestJSON(t, web, "GET", "/api/records/1", nil, 200, &item)
+	if !strings.Contains(item.AgentError, "回退") {
+		t.Fatalf("未记录 Agent 失败: %+v", item)
+	}
+}
+
+// TestAgentRequiresToolCall 校验未标注工具调用能力时不启用 Agent。
+func TestAgentRequiresToolCall(t *testing.T) {
+	s, web, _ := setupServer(t)
+	fake := usageMockServer(t, "<answer>A</answer>")
+	defer fake.Close()
+	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL, APIKey: "demo"},
+		ModelConfig{Model: "plain-model", Vision: CapabilityAuto, ToolCall: CapabilityOff})
+	answer := s.config.snapshot().Answer
+	answer.Agent = AgentConfig{Enabled: true, MaxIterations: 3}
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	var result struct{ Question, Answer string }
+	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "无工具能力"}, 200, &result)
+	if result.Answer != "A" {
+		t.Fatalf("普通作答异常: %+v", result)
+	}
+	var item Record
+	requestJSON(t, web, "GET", "/api/records/1", nil, 200, &item)
+	if !strings.Contains(item.AgentError, "工具调用") {
+		t.Fatalf("未提示工具调用能力缺失: %+v", item)
+	}
+	if len(item.Calls) != 1 || item.Calls[0].Slot != "answer" {
+		t.Fatalf("调用归属异常: %+v", item.Calls)
+	}
+}
+
+// TestHistoryTool 校验历史记录检索工具。
+func TestHistoryTool(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	ctx := context.Background()
+	id, err := store.pending(ctx, "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := Record{ID: id, Timestamp: "2026-01-01T00:00:00.000000", Type: "single", Status: "complete",
+		RawTitle: "函数的单调性是", Answer: "A"}
+	if err = store.complete(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	tool := &historyTool{store: store}
+	result, err := tool.InvokableRun(ctx, `{"query":"函数"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "函数的单调性是") || !strings.Contains(result, "答案：A") {
+		t.Fatalf("工具返回异常: %s", result)
+	}
+	result, err = tool.InvokableRun(ctx, `{"query":"不存在的关键词"}`)
+	if err != nil || !strings.Contains(result, "没有找到") {
+		t.Fatalf("空结果处理异常: %s %v", result, err)
+	}
+	if _, err = tool.InvokableRun(ctx, `{`); err == nil {
+		t.Fatal("非法参数应返回错误")
+	}
+}

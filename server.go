@@ -110,7 +110,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, err)
 		return
 	}
-	result, solveErr := s.solver.solve(r.Context(), request.Title, request.Options, request.Type)
+	result, solveErr := s.solver.solve(withRecordID(r.Context(), id), request.Title, request.Options, request.Type)
 	result.ID = id
 	if err := s.store.complete(r.Context(), result); err != nil {
 		jsonError(w, 500, err)
@@ -341,6 +341,12 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, err)
 		return
 	}
+	calls, err := s.store.modelCalls(r.Context(), id)
+	if err != nil {
+		jsonError(w, 500, err)
+		return
+	}
+	item.Calls = calls
 	jsonResponse(w, 200, item)
 }
 

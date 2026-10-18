@@ -46,7 +46,20 @@ interface RecordItem {
   answer_model: string;
   caption_model: string;
   vision: boolean;
+  agent_error?: string;
   total_time_ms: number;
+  calls?: Array<{
+    id: number;
+    slot: string;
+    model: string;
+    protocol: string;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    latency_ms: number;
+    status: string;
+    error?: string;
+  }>;
 }
 
 interface RecordsResponse {
@@ -54,6 +67,12 @@ interface RecordsResponse {
   total: number;
   page: number;
   pages: number;
+}
+
+function callSlotLabel(slot: string) {
+  if (slot === 'caption') return '图片转述';
+  if (slot === 'agent') return 'Agent';
+  return '回答';
 }
 
 export default function Records() {
@@ -281,6 +300,38 @@ export default function Records() {
                       {detailData.answer || '(空)'}
                     </div>
                   </div>
+
+                  {/* Agent 提示 */}
+                  {detailData.agent_error && (
+                    <div className="space-y-2">
+                      <h4 className="text-xs font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wider">Agent 提示</h4>
+                      <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-100 dark:border-amber-900 text-xs text-amber-900 dark:text-amber-100">
+                        {detailData.agent_error}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 模型调用 */}
+                  {detailData.calls && detailData.calls.length > 0 && (
+                    <div className="space-y-2">
+                      <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">模型调用</h4>
+                      <div className="space-y-2">
+                        {detailData.calls.map((call) => (
+                          <div key={call.id} className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-muted/30 border border-border/30 text-xs">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Badge variant="outline" className="font-normal shrink-0">{callSlotLabel(call.slot)}</Badge>
+                              <span className="font-mono text-muted-foreground truncate">{call.model}</span>
+                            </div>
+                            <div className="flex items-center gap-3 text-muted-foreground shrink-0">
+                              <span title="输入 / 输出 token">{call.prompt_tokens} / {call.completion_tokens}</span>
+                              <span>{call.latency_ms} ms</span>
+                              {call.status === 'error' && <span className="text-destructive">失败</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Reasoning */}
                   {detailData.reasoning && (
