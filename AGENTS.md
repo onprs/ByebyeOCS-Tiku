@@ -19,9 +19,9 @@
 ## 发布维护
 
 - Release 产物为包含网页资源的单个可执行文件，覆盖 Windows、Linux、macOS 的 amd64 和 arm64；发布包不依赖外部网页目录或运行时工具链。
-- 本地发布构建在 Linux 维护环境执行，需要 Bash、Go 和 `sha256sum`。先完成前端构建，再运行 `bash scripts/build-release.sh v主版本.次版本.修订版本`，产物及 `SHA256SUMS` 写入 `dist/对应版本/`。
+- 本地发布构建在 Linux 维护环境执行，需要 Bash、Go 1.26 和 `sha256sum`。发布使用 Go 1.26，避免 JSON 依赖在 Go 1.27 下产生兼容回退提示。先完成前端构建，再运行 `bash scripts/build-release.sh v主版本.次版本.修订版本`，产物及 `SHA256SUMS` 写入 `dist/对应版本/`。
 - 使用 `python3 scripts/check-release.py 可执行文件 版本号` 在空目录中检查本机平台的发布文件；该检查只证明当前平台的启动行为。
-- 每次发布在 `docs/releases/对应版本.md` 编写面向用户的功能说明。推送版本标签会触发 `.github/workflows/release.yml`，完成检查、构建和单文件启动验证后自动发布 GitHub Release。
+- 每次发布在 `docs/releases/对应版本.md` 编写面向用户的功能说明。推送版本标签会触发 `.github/workflows/release.yml`，完成检查、构建和单文件启动验证后自动发布 GitHub Release；也可手动运行该工作流并指定现有标签，重试尚未完成的发布。
 - `-frontend-dir` 可在维护时覆盖内置网页；公开用户默认直接运行下载的可执行文件。
 
 ## 提交与同步

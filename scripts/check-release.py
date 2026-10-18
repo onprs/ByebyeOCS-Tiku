@@ -26,6 +26,7 @@ def check_release(binary, version):
             capture_output=True, text=True, check=True, timeout=10,
         )
         assert result.stdout.strip() == f"OCS-Tiku {version}", result.stdout
+        assert not result.stderr.strip(), result.stderr
         assert list(runtime.iterdir()) == [executable], "查询版本不应创建运行文件"
 
         with socket.socket() as listener:
