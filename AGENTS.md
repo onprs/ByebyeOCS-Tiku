@@ -9,10 +9,10 @@
 
 ## 项目结构与验证
 
-- `main.go` 启动 Go 服务；`server.go` 提供题库搜索、配置、记录与静态页面接口；`solver.go`、`preprocess.go`、`model.go` 处理答题与图片；`providers.go` 按协议构造模型客户端；`capability.go` 合并模型库推断与手动标注；`services.go` 定义预置服务模板；`store.go` 使用 SQLite；`config.go` 读取和保存配置。
+- `main.go` 启动 Go 服务；`server.go` 提供题库搜索、配置、记录与静态页面接口；`solver.go`、`preprocess.go`、`model.go` 处理答题与图片；`providers.go` 按协议构造模型客户端；`capability.go` 合并模型库推断与手动标注；`services.go` 定义预置服务模板；`store.go` 使用 SQLite；`history.go` 维护历史检索倒排索引与升级迁移；`config.go` 读取和保存配置。
 - `internal/catalog` 维护模型能力索引：内置 models.dev 快照、本地缓存与 ETag 条件更新；`tools/snapshot` 生成内置快照。
 - `frontend/` 是 React、TypeScript、Vite 应用；生产构建输出到 `frontend/dist/`。`legacy/python/` 是旧实现归档，不参与新版启动。
-- 后端运行 `go test . ./internal/catalog ./tools/snapshot` 和 `go vet . ./internal/catalog ./tools/snapshot`；前端运行 `npm run build`、`npm run lint`。涉及行为修改时补充相应测试。检查结果有警告或失败时如实记录。
+- 后端运行 `go test . ./internal/catalog ./tools/snapshot` 和 `go vet . ./internal/catalog ./tools/snapshot`；前端运行 `npm run build`、`npm run lint`；浏览器回归在构建后运行 `npm run test:browser`，需要 Chrome 或 Chromium，可用 `CHROME_BIN` 指定浏览器。涉及行为修改时补充相应测试。检查结果有警告或失败时如实记录。
 - 公开安装和使用见 `README.md`。公开说明不能依赖维护者的本机路径、代理或账号。
 - 协议与厂商是两个维度：协议决定调用组件与消息编码，厂商决定能力元数据归属与私有扩展，不要混作一个字段。
 

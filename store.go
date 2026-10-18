@@ -41,6 +41,17 @@ type Record struct {
 	Calls            []ModelCall `json:"calls,omitempty"`
 }
 
+// RecordSummary 是列表轮询使用的记录摘要。
+type RecordSummary struct {
+	ID             int64  `json:"id"`
+	Timestamp      string `json:"timestamp"`
+	Type           string `json:"type"`
+	Status         string `json:"status"`
+	ProcessedTitle string `json:"processed_title"`
+	Answer         string `json:"answer"`
+	TotalTimeMS    int64  `json:"total_time_ms"`
+}
+
 // ModelCall 是一次模型调用的用量记录。
 type ModelCall struct {
 	ID               int64  `json:"id"`
@@ -172,14 +183,19 @@ func openStore(path string) (*Store, error) {
 		if _, err = db.Exec(`INSERT OR IGNORE INTO record_totals (id, complete_count, success_count, total_time_ms)
 			SELECT 1,
 				COALESCE(SUM(CASE WHEN status='complete' THEN 1 ELSE 0 END),0),
-				COALESCE(SUM(CASE WHEN status='complete' AND answer NOT LIKE 'ERROR%' THEN 1 ELSE 0 END),0),
+				COALESCE(SUM(CASE WHEN status='complete' AND trim(answer)!='' AND answer NOT LIKE 'ERROR%' THEN 1 ELSE 0 END),0),
 				COALESCE(SUM(CASE WHEN status='complete' THEN total_time_ms ELSE 0 END),0)
 			FROM records`); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
-	return &Store{db: db}, nil
+	store := &Store{db: db}
+	if err := store.migrateSearch(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 func (s *Store) close() error { return s.db.Close() }
@@ -235,6 +251,9 @@ func (s *Store) pending(ctx context.Context, kind string) (int64, error) {
 
 // complete 把待处理记录写成完成状态，并同步更新记录统计。
 func (s *Store) complete(ctx context.Context, r Record) error {
+	if strings.TrimSpace(r.Answer) == "" {
+		r.Answer = "ERROR: " + errEmptyAnswer.Error()
+	}
 	images, err := json.Marshal(r.Images)
 	if err != nil {
 		return err
@@ -262,8 +281,11 @@ func (s *Store) complete(ctx context.Context, r Record) error {
 		return tx.Commit()
 	}
 	success := 0
-	if !strings.HasPrefix(strings.ToUpper(r.Answer), "ERROR") {
+	if successfulAnswer(r.Answer) {
 		success = 1
+		if err := indexHistory(ctx, tx, r.ID, r.RawTitle, r.ProcessedTitle); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO record_totals (id, complete_count, success_count, total_time_ms)
 		VALUES (1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET complete_count=complete_count+1,
@@ -296,16 +318,17 @@ func (s *Store) get(ctx context.Context, id int64) (Record, error) {
 	return scanRecord(s.db.QueryRowContext(ctx, "SELECT "+recordColumns+" FROM records WHERE id=?", id))
 }
 
-func (s *Store) list(ctx context.Context, limit, offset int) ([]Record, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordColumns+" FROM records ORDER BY id DESC LIMIT ? OFFSET ?", limit, offset)
+func (s *Store) list(ctx context.Context, limit, offset int) ([]RecordSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, timestamp, type, status, substr(processed_title,1,300),
+		substr(answer,1,200), total_time_ms FROM records ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := []Record{}
+	result := []RecordSummary{}
 	for rows.Next() {
-		r, err := scanRecord(rows)
-		if err != nil {
+		var r RecordSummary
+		if err := rows.Scan(&r.ID, &r.Timestamp, &r.Type, &r.Status, &r.ProcessedTitle, &r.Answer, &r.TotalTimeMS); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -324,23 +347,10 @@ func escapeLike(text string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(text)
 }
 
-// search 按关键词检索已成功作答的历史记录，供 Agent 工具使用。
-func (s *Store) search(ctx context.Context, keyword string, limit int) ([]Record, error) {
-	pattern := "%" + escapeLike(keyword) + "%"
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordColumns+" FROM records WHERE status='complete' AND answer NOT LIKE 'ERROR%' AND (raw_title LIKE ? ESCAPE '\\' OR processed_title LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT ?", pattern, pattern, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := []Record{}
-	for rows.Next() {
-		record, err := scanRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, record)
-	}
-	return result, rows.Err()
+// successfulAnswer 排除空答案及模型错误，供统计和历史索引共用。
+func successfulAnswer(answer string) bool {
+	answer = strings.TrimSpace(answer)
+	return answer != "" && !strings.HasPrefix(strings.ToUpper(answer), "ERROR")
 }
 
 type Stats struct {

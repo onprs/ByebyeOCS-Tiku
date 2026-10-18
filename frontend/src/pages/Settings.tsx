@@ -114,17 +114,28 @@ export default function Settings() {
   );
 }
 
+function availableServiceID(base: string, services: Record<string, ServiceConfig>) {
+  let id = base;
+  for (let suffix = 2; Object.hasOwn(services, id); suffix++) {
+    id = `${base}-${suffix}`;
+  }
+  return id;
+}
+
 function ServicesPanel({ data, onSaved }: { data: SettingsData; onSaved: () => void }) {
   const { toast } = useToast();
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<ServiceConfig | null>(null);
   const [creating, setCreating] = useState(false);
+  const [serviceID, setServiceID] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
 
   const services = useMemo(() => Object.entries(data.services || {}), [data.services]);
 
   const startCreate = (template?: ServiceTemplate) => {
     setCreating(true);
     setEditing(null);
+    setServiceID(availableServiceID(template?.id || "service", data.services || {}));
     setDraft({
       name: template?.name || "",
       protocol: template?.protocol || data.protocols[0]?.id || "",
@@ -147,14 +158,29 @@ function ServicesPanel({ data, onSaved }: { data: SettingsData; onSaved: () => v
   };
 
   const save = async (id: string) => {
-    if (!draft) return;
+    if (!draft || isSaving) return;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) {
+      toast({ variant: "destructive", title: "服务标识无效", description: "请使用字母或数字开头，最多 64 位，可包含点、下划线和连字符。" });
+      return;
+    }
+    if (creating && Object.hasOwn(data.services, id)) {
+      toast({ variant: "destructive", title: "服务标识已存在", description: "请使用其他标识。" });
+      return;
+    }
+    setIsSaving(true);
     try {
-      await api.put(`/api/services/${id}`, draft);
+      if (creating) {
+        await api.post(`/api/services/${encodeURIComponent(id)}`, draft);
+      } else {
+        await api.put(`/api/services/${encodeURIComponent(id)}`, draft);
+      }
       toast({ title: "保存成功", description: "服务配置已更新。", className: successToast });
       cancel();
       onSaved();
     } catch (err) {
       toast({ variant: "destructive", title: "保存失败", description: errorDescription(err) });
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -201,6 +227,7 @@ function ServicesPanel({ data, onSaved }: { data: SettingsData; onSaved: () => v
                   protocols={data.protocols}
                   onSubmit={() => save(id)}
                   onCancel={cancel}
+                  isSaving={isSaving}
                 />
               )}
             </div>
@@ -233,11 +260,12 @@ function ServicesPanel({ data, onSaved }: { data: SettingsData; onSaved: () => v
               draft={draft}
               setDraft={setDraft}
               protocols={data.protocols}
-              onSubmit={() => save((draft.name || "custom").toLowerCase().replace(/[^a-z0-9._-]+/g, "-"))}
+              onSubmit={() => save(serviceID)}
               onCancel={cancel}
+              isSaving={isSaving}
               askID
-              idValue={(draft.name || "custom").toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}
-              onIDChange={() => undefined}
+              idValue={serviceID}
+              onIDChange={setServiceID}
             />
           )}
         </CardContent>
@@ -254,6 +282,8 @@ function ServiceForm({
   onCancel,
   askID,
   idValue,
+  onIDChange,
+  isSaving,
 }: {
   draft: ServiceConfig;
   setDraft: (value: ServiceConfig) => void;
@@ -263,13 +293,14 @@ function ServiceForm({
   askID?: boolean;
   idValue?: string;
   onIDChange?: (value: string) => void;
+  isSaving: boolean;
 }) {
   return (
     <div className="space-y-4 mt-4 border-t border-border/40 pt-4">
       {askID && (
         <div className="grid gap-2">
           <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">服务标识</Label>
-          <Input value={idValue} readOnly className="bg-muted/40 font-mono" />
+          <Input value={idValue} onChange={e => onIDChange?.(e.target.value)} maxLength={64} className="bg-muted/40 font-mono" />
         </div>
       )}
       <div className="grid gap-2">
@@ -302,8 +333,8 @@ function ServiceForm({
         <p className="text-[11px] text-muted-foreground">用于推断模型能力，填写模型所属厂商的标识可提高识别准确度。</p>
       </div>
       <div className="flex justify-end gap-2">
-        <Button variant="ghost" onClick={onCancel}>取消</Button>
-        <Button onClick={onSubmit}><Save className="w-4 h-4 mr-2" />保存</Button>
+        <Button variant="ghost" onClick={onCancel} disabled={isSaving}>取消</Button>
+        <Button onClick={onSubmit} disabled={isSaving}><Save className="w-4 h-4 mr-2" />{isSaving ? "保存中..." : "保存"}</Button>
       </div>
     </div>
   );
@@ -408,7 +439,7 @@ function ModelCard({
   const test = async () => {
     setIsTesting(true);
     try {
-      await api.get(`/api/test/${kind}`);
+      await api.post(`/api/test/${kind}`, draft);
       toast({ title: "连通性测试通过", description: "模型可以正常连接并返回结果。", className: successToast });
     } catch (err) {
       toast({ variant: "destructive", title: "测试失败", description: errorDescription(err) });

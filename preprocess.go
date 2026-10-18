@@ -253,6 +253,7 @@ func (p *ImageProcessor) process(ctx context.Context, title, options string, cap
 		return title, options, infos, nil, errors.New("回答模型未标注图片能力，且未配置图片转述模型")
 	}
 	seen := map[string]bool{}
+	var processErr error
 	for _, raw := range urls {
 		if seen[raw] {
 			continue
@@ -277,6 +278,7 @@ func (p *ImageProcessor) process(ctx context.Context, title, options string, cap
 		}
 		if err != nil {
 			info.Description = classifyImageError(err)
+			processErr = errors.Join(processErr, fmt.Errorf("第 %d 张图片处理失败: %w", len(infos)+1, err))
 		} else {
 			info.Status = "done"
 		}
@@ -286,7 +288,7 @@ func (p *ImageProcessor) process(ctx context.Context, title, options string, cap
 			options = strings.ReplaceAll(options, raw, "[图片: "+info.Description+"]")
 		}
 	}
-	return title, options, infos, images, nil
+	return title, options, infos, images, processErr
 }
 
 func classifyImageError(err error) string {

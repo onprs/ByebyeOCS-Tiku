@@ -15,7 +15,7 @@ import (
 // runAgent 让 agent 分步推理并调用工具完成作答，返回最终输出文本与思考内容。
 // messages 中的用户消息由调用方提供，系统提示词取自配置的答题提示词。
 func (s *Solver) runAgent(ctx context.Context, cfg fileConfig, service ServiceConfig, messages []chatMessage) (string, string, error) {
-	base, err := s.models.newChatModel(ctx, service, cfg.Answer.Answer, 0.1, 0)
+	base, err := s.models.newChatModel(ctx, service, cfg.Answer.Answer, cfg.Answer.Temperature, 0)
 	if err != nil {
 		return "", "", modelError(err)
 	}

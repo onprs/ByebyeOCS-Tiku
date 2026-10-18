@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,7 +21,10 @@ const (
 	CapabilityOff  = "off"
 )
 
-var serviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var (
+	serviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	errServiceExists = errors.New("服务标识已存在，请使用其他标识")
+)
 
 // ServiceConfig 是一个服务条目：协议、端点与凭据。
 type ServiceConfig struct {
@@ -232,8 +236,17 @@ func validateModel(model ModelConfig, services map[string]ServiceConfig) error {
 	return nil
 }
 
+// createService 只新增服务，标识重复时拒绝覆盖。
+func (c *Config) createService(id string, service ServiceConfig) error {
+	return c.setService(id, service, true)
+}
+
 // updateService 新增或更新一个服务条目。
 func (c *Config) updateService(id string, service ServiceConfig) error {
+	return c.setService(id, service, false)
+}
+
+func (c *Config) setService(id string, service ServiceConfig, createOnly bool) error {
 	if !serviceIDPattern.MatchString(id) {
 		return errors.New("服务标识只能包含字母、数字、点、下划线和连字符")
 	}
@@ -242,7 +255,11 @@ func (c *Config) updateService(id string, service ServiceConfig) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, exists := c.data.Services[id]; createOnly && exists {
+		return errServiceExists
+	}
 	old := c.data
+	c.data.Services = maps.Clone(old.Services)
 	if c.data.Services == nil {
 		c.data.Services = map[string]ServiceConfig{}
 	}
@@ -265,6 +282,7 @@ func (c *Config) deleteService(id string) error {
 		return errors.New("该服务正在被模型引用，请先更换模型")
 	}
 	old := c.data
+	c.data.Services = maps.Clone(old.Services)
 	delete(c.data.Services, id)
 	if err := c.save(); err != nil {
 		c.data = old
@@ -278,13 +296,9 @@ func (c *Config) updateAnswer(v AnswerConfig) error {
 	if v.Temperature < 0 || v.Temperature > 2 {
 		return errors.New("温度必须在 0 到 2 之间")
 	}
-	c.mu.RLock()
-	services := make(map[string]ServiceConfig, len(c.data.Services))
-	for id, service := range c.data.Services {
-		services[id] = service
-	}
-	c.mu.RUnlock()
-	if err := validateModel(v.Answer, services); err != nil && !(v.Answer.Service == "" && v.Answer.Model == "") {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := validateModel(v.Answer, c.data.Services); err != nil && !(v.Answer.Service == "" && v.Answer.Model == "") {
 		return fmt.Errorf("回答模型: %w", err)
 	}
 	if v.Answer.Service == "" && v.Answer.Model == "" {
@@ -292,7 +306,7 @@ func (c *Config) updateAnswer(v AnswerConfig) error {
 	}
 	captionEmpty := v.Caption.Service == "" && v.Caption.Model == ""
 	if !captionEmpty {
-		if err := validateModel(v.Caption, services); err != nil {
+		if err := validateModel(v.Caption, c.data.Services); err != nil {
 			return fmt.Errorf("图片转述模型: %w", err)
 		}
 	} else {
@@ -301,8 +315,6 @@ func (c *Config) updateAnswer(v AnswerConfig) error {
 	if v.Agent.MaxIterations < 1 || v.Agent.MaxIterations > 10 {
 		return errors.New("Agent 步数必须在 1 到 10 之间")
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	old := c.data
 	c.data.Answer = v
 	if err := c.save(); err != nil {

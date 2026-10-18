@@ -16,7 +16,7 @@ type historyTool struct{ store *Store }
 func (t *historyTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: "lookup_history",
-		Desc: "检索本站已作答过的相似题目及其答案，用于确认同一知识点的既有结论",
+		Desc: "检索本站已作答过的相似题目、原选项及答案。历史答案字母仅对应原选项，须按当前题目的选项内容重新判断",
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"query": {Type: schema.String, Desc: "检索关键词，例如知识点或题干片段", Required: true},
 		}),
@@ -55,7 +55,19 @@ func (t *historyTool) InvokableRun(ctx context.Context, arguments string, _ ...t
 		if len(answer) > 200 {
 			answer = truncateText(answer, 200) + "…"
 		}
-		fmt.Fprintf(&builder, "- 题目：%s\n  答案：%s\n", title, answer)
+		options := record.ProcessedOptions
+		if strings.TrimSpace(options) == "" {
+			options = record.RawOptions
+		}
+		options = labelOptions(options)
+		if len(options) > 2000 {
+			options = truncateText(options, 2000) + "…（选项已截断）"
+		}
+		fmt.Fprintf(&builder, "- 题型：%s\n  题目：%s\n", questionLabel(record.Type), title)
+		if options != "" {
+			fmt.Fprintf(&builder, "  原选项：\n%s\n", options)
+		}
+		fmt.Fprintf(&builder, "  答案：%s\n", answer)
 	}
 	return builder.String(), nil
 }

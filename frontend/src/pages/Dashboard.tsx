@@ -22,10 +22,12 @@ const itemVariants = {
 };
 
 export default function Dashboard() {
-  const { data: stats, error: statsError, isLoading: statsLoading } = useSWR('/api/stats', fetcher, { refreshInterval: 5000 });
   const { data: dashboardData, error: dashboardError, isLoading: dashboardLoading } = useSWR('/api/dashboard', fetcher, { refreshInterval: 5000 });
+  const stats = dashboardData?.stats;
+  const statsError = dashboardError;
+  const statsLoading = dashboardLoading;
 
-  // New hooks for OCS Config Panel
+  // OCS 题库配置
   const { data: configData, error: configError } = useSWR('/api/config', fetcher);
   const [configExpanded, setConfigExpanded] = useState(false);
   const { toast } = useToast();
@@ -48,7 +50,6 @@ export default function Dashboard() {
     });
   };
 
-  // Parse success_rate "95%" to 95 for CountUp
   const successRateNum = stats?.success_rate ?? 0;
 
   return (

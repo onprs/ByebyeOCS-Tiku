@@ -62,7 +62,7 @@ var serviceTemplates = []ServiceTemplate{
 	{ID: "moonshotai-cn", Name: "Kimi", Protocol: ProtocolOpenAIChat, BaseURL: "https://api.moonshot.cn/v1", Vendor: "moonshotai-cn", Doc: "https://platform.moonshot.cn/docs/api/chat"},
 	{ID: "zhipuai", Name: "智谱 GLM", Protocol: ProtocolOpenAIChat, BaseURL: "https://open.bigmodel.cn/api/paas/v4", Vendor: "zhipuai", Doc: "https://docs.bigmodel.cn"},
 	{ID: "minimax", Name: "MiniMax（国际）", Protocol: ProtocolOpenAIChat, BaseURL: "https://api.minimax.io/v1", Vendor: "minimax", Doc: "https://platform.minimax.io/docs/guides/quickstart"},
-	{ID: "minimax-cn", Name: "MiniMax", Protocol: ProtocolOpenAIChat, Vendor: "minimax-cn", Doc: "https://platform.minimaxi.com/docs/guides/quickstart"},
+	{ID: "minimax-cn", Name: "MiniMax", Protocol: ProtocolOpenAIChat, BaseURL: "https://api.minimax.cn/v1", Vendor: "minimax-cn", Doc: "https://platform.minimaxi.com/docs/guides/quickstart"},
 	{ID: "volcengine", Name: "火山方舟", Protocol: ProtocolOpenAIChat, BaseURL: "https://ark.cn-beijing.volces.com/api/v3", Vendor: "volcengine", Doc: "https://www.volcengine.com/docs/82379"},
 	{ID: "stepfun-ai", Name: "阶跃星辰（国际）", Protocol: ProtocolOpenAIChat, BaseURL: "https://api.stepfun.ai/v1", Vendor: "stepfun-ai", Doc: "https://platform.stepfun.ai/docs/en/overview/concept"},
 	{ID: "stepfun", Name: "阶跃星辰", Protocol: ProtocolOpenAIChat, BaseURL: "https://api.stepfun.com/v1", Vendor: "stepfun", Doc: "https://platform.stepfun.com/docs/zh/overview/concept"},

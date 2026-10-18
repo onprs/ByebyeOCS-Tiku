@@ -48,24 +48,9 @@ func cleanTitle(text string) string {
 	return strings.TrimSpace(spacePattern.ReplaceAllString(html.UnescapeString(tagPattern.ReplaceAllString(text, "")), " "))
 }
 
-func labelOptions(options string) string {
-	if strings.TrimSpace(options) == "" {
-		return ""
-	}
+// splitOptions 按选项前缀分组，保留同一选项的续行与图片地址。
+func splitOptions(options string) []string {
 	lines := strings.Split(options, "\n")
-	groups := []string{}
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if optionLabel.MatchString(line) || len(groups) == 0 {
-			groups = append(groups, line)
-		} else {
-			groups[len(groups)-1] += " " + line
-		}
-	}
-	// 未带 A./B. 前缀时，每行都是一个选项。
 	hasLabel := false
 	for _, line := range lines {
 		if optionLabel.MatchString(strings.TrimSpace(line)) {
@@ -73,21 +58,33 @@ func labelOptions(options string) string {
 			break
 		}
 	}
-	if !hasLabel {
-		groups = groups[:0]
-		for _, line := range lines {
-			if line = strings.TrimSpace(line); line != "" {
-				groups = append(groups, line)
-			}
+	groups := []string{}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !hasLabel || optionLabel.MatchString(line) || len(groups) == 0 {
+			groups = append(groups, line)
+		} else {
+			groups[len(groups)-1] += " " + line
 		}
 	}
+	return groups
+}
+
+func optionName(index int) string {
+	if index < 26 {
+		return string(rune('A' + index))
+	}
+	return fmt.Sprintf("%d", index+1)
+}
+
+func labelOptions(options string) string {
+	groups := splitOptions(options)
 	result := make([]string, 0, len(groups))
 	for i, group := range groups {
-		label := fmt.Sprintf("%d", i)
-		if i < 26 {
-			label = string(rune('A' + i))
-		}
-		result = append(result, label+". "+strings.TrimSpace(optionLabel.ReplaceAllString(group, "")))
+		result = append(result, optionName(i)+". "+strings.TrimSpace(optionLabel.ReplaceAllString(group, "")))
 	}
 	return strings.Join(result, "\n")
 }
@@ -114,13 +111,22 @@ func buildPrompt(title, options, kind string) string {
 
 func extractAnswer(content, reasoning, kind string) string {
 	raw := ""
+	tagged := false
 	for _, value := range []string{content, reasoning} {
-		if match := answerPattern.FindStringSubmatch(value); len(match) == 2 && strings.TrimSpace(match[1]) != "" {
-			raw = strings.TrimSpace(match[1])
+		for _, match := range answerPattern.FindAllStringSubmatch(value, -1) {
+			tagged = true
+			if raw = strings.TrimSpace(match[1]); raw != "" {
+				break
+			}
+		}
+		if raw != "" {
 			break
 		}
 	}
 	if raw == "" {
+		if tagged {
+			return ""
+		}
 		return strings.TrimSpace(content)
 	}
 	if kind == "completion" {
@@ -153,15 +159,10 @@ func directContent(title, options, kind string, images map[string][]byte) any {
 	}
 	if kind != "completion" && strings.TrimSpace(options) != "" {
 		parts = append(parts, textPart("选项：\n"+labelOptions(replaceURLs(options))))
-		optionIndex := -1
-		for _, line := range strings.Split(options, "\n") {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			optionIndex++
-			for _, raw := range extractImageURLs(line) {
+		for optionIndex, group := range splitOptions(options) {
+			for _, raw := range extractImageURLs(group) {
 				if data := images[raw]; data != nil {
-					parts = append(parts, textPart(fmt.Sprintf("[选项 %c 的图片]", 'A'+optionIndex)), imagePart(data))
+					parts = append(parts, textPart(fmt.Sprintf("[选项 %s 的图片]", optionName(optionIndex))), imagePart(data))
 				}
 			}
 		}
@@ -243,6 +244,9 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 		} else {
 			agentCtx := s.modelContext(ctx, "agent", answerService, cfg.Answer.Answer)
 			content, reasoning, err = s.runAgent(agentCtx, cfg, answerService, []chatMessage{{Role: "user", Content: userContent}})
+			if err == nil && extractAnswer(content, reasoning, kind) == "" {
+				err = errEmptyAnswer
+			}
 			if err != nil {
 				result.AgentError = "Agent 作答失败，已回退：" + agentErrorText(err)
 				content, reasoning = "", ""
@@ -251,7 +255,7 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 	}
 	if strings.TrimSpace(content) == "" && strings.TrimSpace(reasoning) == "" {
 		answerCtx := s.modelContext(ctx, "answer", answerService, cfg.Answer.Answer)
-		content, reasoning, err = s.models.chat(answerCtx, answerService, cfg.Answer.Answer, prompt, 0.1, 0)
+		content, reasoning, err = s.models.chat(answerCtx, answerService, cfg.Answer.Answer, prompt, cfg.Answer.Temperature, 0)
 		result.RawContent, result.Reasoning = content, reasoning
 		if err != nil {
 			result.Answer = "ERROR: " + err.Error()
@@ -261,6 +265,10 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 		result.RawContent, result.Reasoning = content, reasoning
 	}
 	result.Answer = extractAnswer(content, reasoning, kind)
+	if result.Answer == "" {
+		result.Answer = "ERROR: " + errEmptyAnswer.Error()
+		return result, errEmptyAnswer
+	}
 	return result, nil
 }
 
@@ -289,4 +297,7 @@ func answerDisabled(model ModelConfig) bool {
 	return strings.TrimSpace(model.Model) == "" || strings.TrimSpace(model.Service) == ""
 }
 
-var errAnswerMissing = errors.New("请先在设置中配置回答模型")
+var (
+	errAnswerMissing = errors.New("请先在设置中配置回答模型")
+	errEmptyAnswer   = errors.New("模型未返回有效答案")
+)

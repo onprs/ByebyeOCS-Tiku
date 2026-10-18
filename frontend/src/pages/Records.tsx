@@ -1,13 +1,7 @@
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/api';
 import { motion } from 'framer-motion';
-import {
-  useReactTable,
-  getCoreRowModel,
-  flexRender,
-  type ColumnDef,
-} from '@tanstack/react-table';
 import {
   Table,
   TableBody,
@@ -30,15 +24,19 @@ import { Card } from '@/components/ui/card';
 import { Clock, HelpCircle, Bot, AlertCircle, CheckCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-interface RecordItem {
+interface RecordSummary {
   id: number;
   timestamp: string;
   type: string;
   status: string;
   processed_title: string;
+  answer: string;
+  total_time_ms: number;
+}
+
+interface RecordItem extends RecordSummary {
   raw_options: string;
   processed_options: string;
-  answer: string;
   reasoning: string;
   raw_content: string;
   images: Array<{ url: string; description: string; src: string; status: string }>;
@@ -47,7 +45,6 @@ interface RecordItem {
   caption_model: string;
   vision: boolean;
   agent_error?: string;
-  total_time_ms: number;
   calls?: Array<{
     id: number;
     slot: string;
@@ -63,7 +60,7 @@ interface RecordItem {
 }
 
 interface RecordsResponse {
-  records: RecordItem[];
+  records: RecordSummary[];
   total: number;
   page: number;
   pages: number;
@@ -84,67 +81,9 @@ export default function Records() {
 
   const { data: detailData, error: detailError, isLoading: detailLoading } = useSWR<RecordItem>(
     selectedId ? `/api/records/${selectedId}` : null,
-    fetcher
+    fetcher,
+    { refreshInterval: record => record?.status === 'pending' ? 1000 : 0 }
   );
-
-  const columns = useMemo<ColumnDef<RecordItem>[]>(() => [
-    {
-      accessorKey: 'id',
-      header: 'ID',
-      cell: (info) => <div className="w-12 truncate font-mono text-xs text-muted-foreground">{info.getValue() as number}</div>,
-    },
-    {
-      accessorKey: 'processed_title',
-      header: '题目',
-      cell: (info) => (
-        <div className="max-w-[350px] truncate font-medium" title={info.getValue() as string}>
-          {(info.getValue() as string) || '(空)'}
-        </div>
-      ),
-    },
-    {
-      accessorKey: 'type',
-      header: '题型',
-      cell: (info) => (
-        <Badge variant="outline" className="bg-slate-50 dark:bg-slate-800 text-xs font-normal">
-          {info.getValue() as string || '未知'}
-        </Badge>
-      )
-    },
-    {
-      accessorKey: 'answer',
-      header: '解析结果',
-      cell: (info) => {
-        const val = info.getValue() as string;
-        const isError = val?.toUpperCase().includes('ERROR') || val?.includes('失败');
-        return (
-          <div className="max-w-[200px] truncate text-sm">
-            {val ? (
-              <Badge variant={isError ? "destructive" : "secondary"} className={`font-normal ${!isError && 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-400 hover:bg-emerald-100'}`}>
-                {val}
-              </Badge>
-            ) : (
-              <span className="text-muted-foreground italic text-xs">处理中...</span>
-            )}
-          </div>
-        )
-      },
-    },
-    {
-      accessorKey: 'timestamp',
-      header: '请求时间',
-      cell: (info) => {
-        const val = info.getValue() as string;
-        return <div className="text-muted-foreground text-xs">{val ? new Date(val).toLocaleString() : ''}</div>;
-      },
-    },
-  ], []);
-
-  const table = useReactTable({
-    data: recordsData || [],
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  });
 
   return (
     <motion.div initial={false} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="space-y-6">
@@ -156,25 +95,18 @@ export default function Records() {
       <Card className="glass overflow-hidden border-border/50 shadow-sm">
         <Table>
           <TableHeader className="bg-muted/50">
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id} className="hover:bg-transparent">
-                {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} className="text-xs font-semibold uppercase tracking-wider text-muted-foreground py-4">
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext()
-                        )}
-                  </TableHead>
-                ))}
-              </TableRow>
-            ))}
+            <TableRow className="hover:bg-transparent">
+              {['ID', '题目', '题型', '解析结果', '请求时间'].map(header => (
+                <TableHead key={header} className="text-xs font-semibold uppercase tracking-wider text-muted-foreground py-4">
+                  {header}
+                </TableHead>
+              ))}
+            </TableRow>
           </TableHeader>
           <TableBody>
             {recordsLoading ? (
               <TableRow>
-                <TableCell colSpan={columns.length} className="h-48 text-center">
+                <TableCell colSpan={5} className="h-48 text-center">
                   <div className="flex flex-col items-center justify-center text-muted-foreground animate-pulse">
                     <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin mb-2" />
                     加载数据中...
@@ -183,31 +115,57 @@ export default function Records() {
               </TableRow>
             ) : recordsError ? (
               <TableRow>
-                <TableCell colSpan={columns.length} className="h-48 text-center text-destructive">
+                <TableCell colSpan={5} className="h-48 text-center text-destructive">
                   <div className="flex flex-col items-center justify-center">
                     <AlertCircle className="h-8 w-8 mb-2 opacity-50" />
                     加载失败: {recordsError.message}
                   </div>
                 </TableCell>
               </TableRow>
-            ) : table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  data-state={row.getIsSelected() && 'selected'}
-                  onClick={() => setSelectedId(row.original.id)}
-                  className="cursor-pointer hover:bg-muted/60 transition-colors"
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id} className="py-3">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+            ) : recordsData?.length ? (
+              recordsData.map(record => {
+                const isError = record.answer?.toUpperCase().startsWith('ERROR') || (record.status === 'complete' && !record.answer);
+                return (
+                  <TableRow
+                    key={record.id}
+                    onClick={() => setSelectedId(record.id)}
+                    className="cursor-pointer hover:bg-muted/60 transition-colors"
+                  >
+                    <TableCell className="py-3">
+                      <div className="w-12 truncate font-mono text-xs text-muted-foreground">{record.id}</div>
                     </TableCell>
-                  ))}
-                </TableRow>
-              ))
+                    <TableCell className="py-3">
+                      <div className="max-w-[350px] truncate font-medium" title={record.processed_title}>
+                        {record.processed_title || '(空)'}
+                      </div>
+                    </TableCell>
+                    <TableCell className="py-3">
+                      <Badge variant="outline" className="bg-slate-50 dark:bg-slate-800 text-xs font-normal">
+                        {record.type || '未知'}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="py-3">
+                      <div className="max-w-[200px] truncate text-sm">
+                        {record.status === 'pending' ? (
+                          <span className="text-muted-foreground italic text-xs">处理中...</span>
+                        ) : (
+                          <Badge variant={isError ? 'destructive' : 'secondary'} className={`font-normal ${!isError ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-400 hover:bg-emerald-100' : ''}`}>
+                            {record.answer || '未返回有效答案'}
+                          </Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="py-3">
+                      <div className="text-muted-foreground text-xs">
+                        {record.timestamp ? new Date(record.timestamp).toLocaleString() : ''}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })
             ) : (
               <TableRow>
-                <TableCell colSpan={columns.length} className="h-48 text-center">
+                <TableCell colSpan={5} className="h-48 text-center">
                   <div className="flex flex-col items-center justify-center text-muted-foreground">
                     <HelpCircle className="h-8 w-8 mb-2 opacity-30" />
                     暂无题库记录
@@ -232,7 +190,7 @@ export default function Records() {
       </div>
 
       <Sheet open={!!selectedId} onOpenChange={(open) => !open && setSelectedId(null)}>
-        <SheetContent className="w-[450px] sm:w-[540px] sm:max-w-none flex flex-col h-full border-l-border/50 glass">
+        <SheetContent className="w-full max-w-[450px] sm:w-[540px] sm:max-w-[calc(100vw-2rem)] flex flex-col h-full border-l-border/50 glass">
           <SheetHeader className="pb-4 border-b border-border/50">
             <SheetTitle className="flex items-center gap-2">
               <Bot className="h-5 w-5 text-primary" />
@@ -297,7 +255,7 @@ export default function Records() {
                   <div className="space-y-2">
                     <h4 className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1"><CheckCircle className="h-3 w-3" /> 大模型提取答案</h4>
                     <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900 text-sm font-semibold text-emerald-900 dark:text-emerald-100 leading-relaxed shadow-sm">
-                      {detailData.answer || '(空)'}
+                      {detailData.status === 'pending' ? '处理中...' : detailData.answer || '未返回有效答案'}
                     </div>
                   </div>
 

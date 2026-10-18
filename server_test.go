@@ -128,18 +128,18 @@ func TestSearchAndRecords(t *testing.T) {
 		t.Fatalf("搜索响应异常: %+v", response)
 	}
 	var records struct {
-		Records []Record `json:"records"`
-		Total   int      `json:"total"`
-		Pages   int      `json:"pages"`
+		Records []RecordSummary `json:"records"`
+		Total   int             `json:"total"`
+		Pages   int             `json:"pages"`
 	}
 	requestJSON(t, web, "GET", "/api/records?page=1&limit=1", nil, 200, &records)
-	if records.Total != 1 || len(records.Records) != 1 || records.Records[0].TotalTimeMS < 0 || !strings.Contains(records.Records[0].FinalPrompt, "A. 选择一") || records.Records[0].Reasoning != "思考" {
+	if records.Total != 1 || len(records.Records) != 1 || records.Records[0].TotalTimeMS < 0 || records.Records[0].Answer != "A#B" {
 		t.Fatalf("记录异常: %+v", records)
 	}
 	id := records.Records[0].ID
 	var detail Record
 	requestJSON(t, web, "GET", "/api/records/"+itoa(id), nil, 200, &detail)
-	if detail.Answer != "A#B" || detail.Status != "complete" || detail.AnswerModel != "测试服务 (test-text)" {
+	if detail.Answer != "A#B" || detail.Status != "complete" || detail.AnswerModel != "测试服务 (test-text)" || !strings.Contains(detail.FinalPrompt, "A. 选择一") || detail.Reasoning != "思考" {
 		t.Fatalf("详情异常: %+v", detail)
 	}
 	var recent []Record

@@ -66,6 +66,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("GET /api/config", s.ocsConfig)
 	mux.HandleFunc("PUT /api/settings/answer", s.updateAnswer)
+	mux.HandleFunc("POST /api/services/{id}", s.createService)
 	mux.HandleFunc("PUT /api/services/{id}", s.updateService)
 	mux.HandleFunc("DELETE /api/services/{id}", s.deleteService)
 	mux.HandleFunc("GET /api/capability", s.capability)
@@ -74,6 +75,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/models/vendors", s.modelVendors)
 	mux.HandleFunc("GET /api/models/list", s.modelList)
 	mux.HandleFunc("GET /api/test/{kind}", s.testModel)
+	mux.HandleFunc("POST /api/test/{kind}", s.testModel)
 	mux.HandleFunc("GET /api/records", s.records)
 	mux.HandleFunc("GET /api/records/recent", s.recentRecords)
 	mux.HandleFunc("GET /api/records/{id}", s.record)
@@ -165,6 +167,22 @@ func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
 		view.Catalog = s.catalog.Status()
 	}
 	jsonResponse(w, 200, view)
+}
+
+func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
+	var service ServiceConfig
+	if !decodeJSON(w, r, &service) {
+		return
+	}
+	if err := s.config.createService(r.PathValue("id"), service); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errServiceExists) {
+			status = http.StatusConflict
+		}
+		jsonError(w, status, err)
+		return
+	}
+	jsonResponse(w, http.StatusCreated, map[string]bool{"ok": true})
 }
 
 func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
@@ -282,6 +300,16 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 404, errors.New("模型类型不存在"))
 		return
 	}
+	if r.Method == http.MethodPost {
+		if !decodeJSON(w, r, &model) {
+			return
+		}
+		if err := validateModel(model, cfg.Services); err != nil {
+			jsonError(w, http.StatusBadRequest, err)
+			return
+		}
+		service = cfg.Services[model.Service]
+	}
 	if model.Model == "" {
 		jsonResponse(w, 400, map[string]any{"ok": false, "error": "模型未配置"})
 		return
@@ -392,17 +420,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, err)
 		return
 	}
-	records, err := s.store.list(r.Context(), 20, 0)
-	if err != nil {
-		jsonError(w, 500, err)
-		return
-	}
 	daily, err := s.store.daily(r.Context())
 	if err != nil {
 		jsonError(w, 500, err)
 		return
 	}
-	jsonResponse(w, 200, map[string]any{"stats": stats, "records": records, "daily_counts": daily})
+	jsonResponse(w, 200, map[string]any{"stats": stats, "daily_counts": daily})
 }
 
 func (s *Server) ocsConfig(w http.ResponseWriter, _ *http.Request) {

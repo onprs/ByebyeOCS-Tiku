@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -72,7 +76,7 @@ func (c *ModelClient) newChatModel(ctx context.Context, service ServiceConfig, m
 		return claude.NewChatModel(ctx, config)
 	case ProtocolGeminiGenerate:
 		client, err := genai.NewClient(ctx, &genai.ClientConfig{
-			APIKey: service.APIKey, HTTPOptions: genai.HTTPOptions{BaseURL: service.BaseURL},
+			APIKey: service.APIKey, HTTPClient: c.http, HTTPOptions: genai.HTTPOptions{BaseURL: service.BaseURL},
 		})
 		if err != nil {
 			return nil, err
@@ -85,13 +89,59 @@ func (c *ModelClient) newChatModel(ctx context.Context, service ServiceConfig, m
 		}
 		return gemini.NewChatModel(ctx, config)
 	case ProtocolOllamaChat:
+		httpClient := c.http
+		if temperature == 0 {
+			copyClient := *httpClient
+			base := copyClient.Transport
+			if base == nil {
+				base = http.DefaultTransport
+			}
+			copyClient.Transport = ollamaZeroTemperatureTransport{base: base}
+			httpClient = &copyClient
+		}
 		config := &ollama.ChatModelConfig{
-			BaseURL: service.BaseURL, Model: model.Model, HTTPClient: c.http,
+			BaseURL: service.BaseURL, Model: model.Model, HTTPClient: httpClient,
+			Options: &ollama.Options{Temperature: float32(temperature), NumPredict: tokens},
 		}
 		return ollama.NewChatModel(ctx, config)
 	default:
 		return nil, fmt.Errorf("未知协议: %s", service.Protocol)
 	}
+}
+
+// ollamaZeroTemperatureTransport 补上 SDK 因 omitempty 丢失的零温度。
+type ollamaZeroTemperatureTransport struct{ base http.RoundTripper }
+
+func (t ollamaZeroTemperatureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method != http.MethodPost || !strings.HasSuffix(request.URL.Path, "/api/chat") || request.Body == nil {
+		return t.base.RoundTrip(request)
+	}
+	defer request.Body.Close()
+	var payload map[string]json.RawMessage
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	options := map[string]json.RawMessage{}
+	if raw := payload["options"]; len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &options); err != nil {
+			return nil, err
+		}
+	}
+	options["temperature"] = json.RawMessage("0")
+	rawOptions, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	payload["options"] = rawOptions
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	copyRequest := request.Clone(request.Context())
+	copyRequest.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	copyRequest.Body, _ = copyRequest.GetBody()
+	copyRequest.ContentLength = int64(len(body))
+	return t.base.RoundTrip(copyRequest)
 }
 
 // toEinoMessages 把内部消息结构转换为 eino 消息。

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test:browser": "node --test tests/browser.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -18,7 +19,6 @@
     "@radix-ui/react-tabs": "^1.1.14",
     "@radix-ui/react-toast": "^1.2.16",
     "@radix-ui/react-tooltip": "^1.2.9",
-    "@tanstack/react-table": "^8.21.3",
     "axios": "^1.17.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
