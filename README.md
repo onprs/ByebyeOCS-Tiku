@@ -4,19 +4,36 @@
 
 ## 安装与启动
 
+从 [Releases](https://github.com/onprs/OCS-Tiku/releases/latest) 下载对应系统与架构的可执行文件：Windows 选择 `.exe`，Linux 选择 `linux`，macOS 选择 `darwin`；x64 选择 `amd64`，ARM64 选择 `arm64`。无需安装 Go 或 Node.js。
+
+将文件放入一个可写目录，并重命名为 `ocs-tiku.exe`（Windows）或 `ocs-tiku`（Linux/macOS），在该目录打开终端启动。
+
+Windows（PowerShell）：
+
+```powershell
+.\ocs-tiku.exe
+```
+
+Linux / macOS：
+
+```sh
+chmod +x ocs-tiku
+./ocs-tiku
+```
+
+在浏览器中打开 http://127.0.0.1:8000 。首次启动会在当前目录创建 `config.yaml` 和 `ocs-tiku.db`。
+
+### 从源码启动
+
 需要 Git、Go 1.25 或更高版本、Node.js 22.12 或更高版本及 npm。
 
 ```sh
 git clone https://github.com/onprs/OCS-Tiku.git
 cd OCS-Tiku
-cd frontend
-npm ci
-npm run build
-cd ..
+npm --prefix frontend ci
+npm --prefix frontend run build
 go run .
 ```
-
-在浏览器中打开 http://127.0.0.1:8000 。首次启动会在当前目录创建 `config.yaml` 和 `ocs-tiku.db`。
 
 ## 配置
 

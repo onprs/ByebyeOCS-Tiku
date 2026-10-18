@@ -53,7 +53,7 @@ func setupServer(t *testing.T) (*Server, *httptest.Server, string) {
 	}
 	models := newModelClient()
 	s := &Server{config: cfg, store: store, models: models, catalog: modelCatalog,
-		assets: assets, imageDir: images.dir}
+		assets: os.DirFS(assets), imageDir: images.dir}
 	s.solver = &Solver{config: cfg, models: models, images: images, catalog: modelCatalog, store: store}
 	web := httptest.NewServer(s.handler())
 	t.Cleanup(web.Close)

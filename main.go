@@ -7,12 +7,14 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/onprs/OCS-Tiku/internal/catalog"
 )
+
+// version 由发布构建写入。
+var version = "dev"
 
 // refreshModels 在后台检查模型库更新，同一天内不重复检查，失败不影响服务。
 func refreshModels(store *catalog.Store) {
@@ -37,9 +39,18 @@ func refreshModels(store *catalog.Store) {
 
 func main() {
 	dataDir := flag.String("data-dir", ".", "配置、数据库、图片和模型库缓存目录")
-	frontendDir := flag.String("frontend-dir", "frontend/dist", "前端构建目录")
+	frontendDir := flag.String("frontend-dir", "", "使用指定目录的网页文件（默认使用内置网页）")
 	listen := flag.String("listen", "", "监听地址（覆盖配置文件）")
+	showVersion := flag.Bool("version", false, "显示版本号并退出")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("OCS-Tiku %s\n", version)
+		return
+	}
+	assets, err := loadFrontend(*frontendDir)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	config, err := loadConfig(filepath.Join(*dataDir, "config.yaml"))
 	if err != nil {
@@ -52,9 +63,6 @@ func main() {
 	}
 	if _, _, err := net.SplitHostPort(address); err != nil {
 		log.Fatalf("监听地址无效: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(*frontendDir, "index.html")); err != nil {
-		log.Fatalf("前端未构建: 请先在 frontend 目录运行 npm ci 和 npm run build: %v", err)
 	}
 	store, err := openStore(filepath.Join(*dataDir, "ocs-tiku.db"))
 	if err != nil {
@@ -72,7 +80,7 @@ func main() {
 	models := newModelClient()
 	server := &Server{config: config, store: store, models: models, catalog: modelCatalog,
 		solver: &Solver{config: config, models: models, images: images, catalog: modelCatalog, store: store},
-		assets: *frontendDir, imageDir: images.dir, address: address}
+		assets: assets, imageDir: images.dir, address: address}
 	go refreshModels(modelCatalog)
 	log.Printf("OCS 题库服务: http://%s", address)
 	log.Fatal(http.ListenAndServe(address, server.handler()))

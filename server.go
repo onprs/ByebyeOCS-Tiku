@@ -9,7 +9,6 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -26,7 +25,7 @@ type Server struct {
 	models   *ModelClient
 	solver   *Solver
 	catalog  *catalog.Store
-	assets   string
+	assets   fs.FS
 	imageDir string
 	address  string
 }
@@ -458,12 +457,9 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if name != "." {
-		if f, err := os.Open(filepath.Join(s.assets, filepath.FromSlash(name))); err == nil {
-			defer f.Close()
-			if stat, err := f.Stat(); err == nil && stat.Mode().IsRegular() {
-				http.ServeContent(w, r, name, stat.ModTime(), f)
-				return
-			}
+		if stat, err := fs.Stat(s.assets, name); err == nil && stat.Mode().IsRegular() {
+			http.FileServerFS(s.assets).ServeHTTP(w, r)
+			return
 		}
 		if path.Ext(name) != "" || strings.HasPrefix(name, "assets/") {
 			http.NotFound(w, r)
@@ -471,5 +467,8 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	http.ServeFile(w, r, s.assets+"/index.html")
+	page := r.Clone(r.Context())
+	page.URL.Path = "/"
+	page.URL.RawPath = ""
+	http.FileServerFS(s.assets).ServeHTTP(w, page)
 }
