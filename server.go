@@ -11,8 +11,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/onprs/OCS-Tiku/internal/catalog"
 )
 
 type Server struct {
@@ -20,6 +23,7 @@ type Server struct {
 	store    *Store
 	models   *ModelClient
 	solver   *Solver
+	catalog  *catalog.Store
 	assets   string
 	imageDir string
 	address  string
@@ -57,11 +61,17 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/search", s.search)
-	mux.HandleFunc("GET /api/config", s.ocsConfig)
 	mux.HandleFunc("GET /api/settings", s.settings)
-	mux.HandleFunc("PUT /api/settings/{kind}", s.updateSettings)
-	mux.HandleFunc("GET /api/test-text", s.testModel)
-	mux.HandleFunc("GET /api/test-vision", s.testModel)
+	mux.HandleFunc("GET /api/config", s.ocsConfig)
+	mux.HandleFunc("PUT /api/settings/answer", s.updateAnswer)
+	mux.HandleFunc("PUT /api/services/{id}", s.updateService)
+	mux.HandleFunc("DELETE /api/services/{id}", s.deleteService)
+	mux.HandleFunc("GET /api/capability", s.capability)
+	mux.HandleFunc("GET /api/models/status", s.modelStatus)
+	mux.HandleFunc("POST /api/models/update", s.updateModels)
+	mux.HandleFunc("GET /api/models/vendors", s.modelVendors)
+	mux.HandleFunc("GET /api/models/list", s.modelList)
+	mux.HandleFunc("GET /api/test/{kind}", s.testModel)
 	mux.HandleFunc("GET /api/records", s.records)
 	mux.HandleFunc("GET /api/records/recent", s.recentRecords)
 	mux.HandleFunc("GET /api/records/{id}", s.record)
@@ -90,6 +100,11 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, errors.New("题目类型无效"))
 		return
 	}
+	cfg := s.config.snapshot()
+	if answerDisabled(cfg.Answer.Answer) || cfg.Services[cfg.Answer.Answer.Service].Protocol == "" {
+		jsonError(w, http.StatusBadRequest, errAnswerMissing)
+		return
+	}
 	id, err := s.store.pending(r.Context(), request.Type)
 	if err != nil {
 		jsonError(w, 500, err)
@@ -108,61 +123,166 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, map[string]string{"question": result.ProcessedTitle, "answer": result.Answer})
 }
 
-func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
-	v := s.config.snapshot()
-	jsonResponse(w, 200, map[string]any{
-		"text": v.Models.Text, "vision": v.Models.Vision, "answer": v.Answer,
-		"text_providers": []string{"deepseek", "openai_compat"}, "vision_providers": []string{"openai_vl"},
-	})
+type protocolInfo struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
-func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
-	var err error
-	switch r.PathValue("kind") {
-	case "text", "vision":
-		var cfg ModelConfig
-		if !decodeJSON(w, r, &cfg) {
-			return
-		}
-		err = s.config.updateModel(r.PathValue("kind"), cfg)
-	case "answer":
-		var cfg AnswerConfig
-		if !decodeJSON(w, r, &cfg) {
-			return
-		}
-		err = s.config.updateAnswer(cfg)
-	default:
-		jsonError(w, 404, errors.New("设置不存在"))
+type vendorInfo struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Models int    `json:"models"`
+}
+
+type settingsView struct {
+	Services   map[string]ServiceConfig `json:"services"`
+	Templates  []ServiceTemplate        `json:"templates"`
+	Protocols  []protocolInfo           `json:"protocols"`
+	Answer     AnswerConfig             `json:"answer"`
+	Capability map[string]Capability    `json:"capability"`
+	Catalog    catalog.Status           `json:"catalog"`
+}
+
+func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
+	cfg := s.config.snapshot()
+	view := settingsView{
+		Services: cfg.Services, Templates: serviceTemplates, Answer: cfg.Answer,
+		Protocols: make([]protocolInfo, 0, len(protocols)),
+		Capability: map[string]Capability{
+			"answer":  resolveCapability(s.catalog, cfg.Services[cfg.Answer.Answer.Service], cfg.Answer.Answer),
+			"caption": resolveCapability(s.catalog, cfg.Services[cfg.Answer.Caption.Service], cfg.Answer.Caption),
+		},
+	}
+	for _, protocol := range protocols {
+		view.Protocols = append(view.Protocols, protocolInfo{ID: protocol, Label: protocolLabel(protocol)})
+	}
+	if s.catalog != nil {
+		view.Catalog = s.catalog.Status()
+	}
+	jsonResponse(w, 200, view)
+}
+
+func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
+	var service ServiceConfig
+	if !decodeJSON(w, r, &service) {
 		return
 	}
-	if err != nil {
-		jsonError(w, 400, err)
+	if err := s.config.updateService(r.PathValue("id"), service); err != nil {
+		jsonError(w, http.StatusBadRequest, err)
 		return
 	}
 	jsonResponse(w, 200, map[string]bool{"ok": true})
 }
 
+func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
+	if err := s.config.deleteService(r.PathValue("id")); err != nil {
+		jsonError(w, http.StatusBadRequest, err)
+		return
+	}
+	jsonResponse(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) updateAnswer(w http.ResponseWriter, r *http.Request) {
+	var answer AnswerConfig
+	if !decodeJSON(w, r, &answer) {
+		return
+	}
+	if err := s.config.updateAnswer(answer); err != nil {
+		jsonError(w, http.StatusBadRequest, err)
+		return
+	}
+	jsonResponse(w, 200, map[string]bool{"ok": true})
+}
+
+// capability 按查询参数计算能力判定，供设置页在选择模型时实时预览。
+func (s *Server) capability(w http.ResponseWriter, r *http.Request) {
+	cfg := s.config.snapshot()
+	query := r.URL.Query()
+	service, ok := cfg.Services[query.Get("service")]
+	if !ok {
+		jsonError(w, http.StatusBadRequest, errors.New("服务不存在"))
+		return
+	}
+	model := ModelConfig{
+		Service: query.Get("service"), Model: query.Get("model"),
+		Vision: query.Get("vision"), ToolCall: query.Get("tool_call"),
+	}
+	jsonResponse(w, 200, resolveCapability(s.catalog, service, model))
+}
+
+func (s *Server) modelStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.catalog == nil {
+		jsonError(w, 503, errors.New("模型库未初始化"))
+		return
+	}
+	jsonResponse(w, 200, s.catalog.Status())
+}
+
+func (s *Server) updateModels(w http.ResponseWriter, r *http.Request) {
+	if s.catalog == nil {
+		jsonError(w, 503, errors.New("模型库未初始化"))
+		return
+	}
+	changed, err := s.catalog.Update(r.Context())
+	if err != nil {
+		jsonError(w, http.StatusBadGateway, err)
+		return
+	}
+	jsonResponse(w, 200, map[string]any{"changed": changed, "catalog": s.catalog.Status()})
+}
+
+func (s *Server) modelVendors(w http.ResponseWriter, _ *http.Request) {
+	if s.catalog == nil {
+		jsonError(w, 503, errors.New("模型库未初始化"))
+		return
+	}
+	index := s.catalog.Catalog()
+	names := index.Vendors()
+	vendors := make([]vendorInfo, 0, len(names))
+	for id, name := range names {
+		vendors = append(vendors, vendorInfo{ID: id, Name: name, Models: len(index.VendorModels(id))})
+	}
+	sort.Slice(vendors, func(i, j int) bool { return vendors[i].Name < vendors[j].Name })
+	jsonResponse(w, 200, vendors)
+}
+
+func (s *Server) modelList(w http.ResponseWriter, r *http.Request) {
+	if s.catalog == nil {
+		jsonError(w, 503, errors.New("模型库未初始化"))
+		return
+	}
+	vendor := r.URL.Query().Get("vendor")
+	if vendor == "" {
+		jsonError(w, http.StatusBadRequest, errors.New("缺少厂商参数"))
+		return
+	}
+	index := s.catalog.Catalog()
+	jsonResponse(w, 200, map[string]any{
+		"vendor": vendor, "name": index.VendorName(vendor), "models": index.VendorModels(vendor),
+	})
+}
+
 func (s *Server) testModel(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.snapshot()
-	var err error
-	switch strings.TrimPrefix(r.URL.Path, "/api/test-") {
-	case "text":
-		if cfg.Models.Text.Provider == "" {
-			err = errors.New("文本模型未配置")
-		} else {
-			err = s.models.testText(r.Context(), cfg.Models.Text)
-		}
-	case "vision":
-		if cfg.Models.Vision.Provider == "" {
-			err = errors.New("视觉模型未配置")
-		} else {
-			err = s.models.testVision(r.Context(), cfg.Models.Vision)
-		}
+	var service ServiceConfig
+	var model ModelConfig
+	switch r.PathValue("kind") {
+	case "answer":
+		service = cfg.Services[cfg.Answer.Answer.Service]
+		model = cfg.Answer.Answer
+	case "caption":
+		service = cfg.Services[cfg.Answer.Caption.Service]
+		model = cfg.Answer.Caption
 	default:
 		jsonError(w, 404, errors.New("模型类型不存在"))
 		return
 	}
-	if err != nil {
+	if model.Model == "" {
+		jsonResponse(w, 400, map[string]any{"ok": false, "error": "模型未配置"})
+		return
+	}
+	capability := resolveCapability(s.catalog, service, model)
+	if err := s.models.test(r.Context(), service, model, capability.Vision); err != nil {
 		jsonResponse(w, 400, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}

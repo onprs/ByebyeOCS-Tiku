@@ -235,10 +235,26 @@ func extractImageURLs(text string) []string {
 	return result
 }
 
-func (p *ImageProcessor) process(ctx context.Context, title, options string, vision ModelConfig, model *ModelClient, direct bool) (string, string, []ImageInfo, map[string][]byte) {
+// captionTask 描述图片转述任务：使用转述模型把图片转换为文字。
+type captionTask struct {
+	prompt  string
+	service ServiceConfig
+	model   ModelConfig
+	client  *ModelClient
+}
+
+// process 处理题目中的图片。直传模式下保留原图数据交给回答模型；
+// 转述模式下用转述模型生成文字描述并替换图片地址。
+func (p *ImageProcessor) process(ctx context.Context, title, options string, caption *captionTask, direct bool) (string, string, []ImageInfo, map[string][]byte, error) {
 	urls := append(extractImageURLs(title), extractImageURLs(options)...)
 	infos := []ImageInfo{}
 	images := map[string][]byte{}
+	if len(urls) == 0 {
+		return title, options, infos, images, nil
+	}
+	if !direct && caption == nil {
+		return title, options, infos, nil, errors.New("回答模型未标注图片能力，且未配置图片转述模型")
+	}
 	seen := map[string]bool{}
 	for _, raw := range urls {
 		if seen[raw] {
@@ -246,38 +262,34 @@ func (p *ImageProcessor) process(ctx context.Context, title, options string, vis
 		}
 		seen[raw] = true
 		info := ImageInfo{URL: raw, Status: "failed"}
-		if vision.Provider == "" {
-			info.Description = "(未配置视觉模型)"
-		} else {
-			data, err := p.fetch(ctx, raw)
-			if err == nil {
-				info.Src, err = p.save(raw, data)
-			}
-			if err == nil {
-				images[raw] = data
-				if direct {
-					info.Description = "已下载"
-				} else {
-					info.Description, err = model.describe(ctx, vision, data)
-					info.Description = strings.TrimSpace(info.Description)
-					if err == nil && info.Description == "" {
-						err = errors.New("未识别")
-					}
+		data, err := p.fetch(ctx, raw)
+		if err == nil {
+			info.Src, err = p.save(raw, data)
+		}
+		if err == nil {
+			images[raw] = data
+			if direct {
+				info.Description = "已下载"
+			} else {
+				info.Description, err = caption.client.describe(ctx, caption.service, caption.model, caption.prompt, data)
+				info.Description = strings.TrimSpace(info.Description)
+				if err == nil && info.Description == "" {
+					err = errors.New("未识别")
 				}
 			}
-			if err != nil {
-				info.Description = classifyImageError(err)
-			} else {
-				info.Status = "done"
-			}
+		}
+		if err != nil {
+			info.Description = classifyImageError(err)
+		} else {
+			info.Status = "done"
 		}
 		infos = append(infos, info)
-		if !direct && vision.Provider != "" {
+		if !direct {
 			title = strings.ReplaceAll(title, raw, "[图片: "+info.Description+"]")
 			options = strings.ReplaceAll(options, raw, "[图片: "+info.Description+"]")
 		}
 	}
-	return title, options, infos, images
+	return title, options, infos, images, nil
 }
 
 func classifyImageError(err error) string {

@@ -43,8 +43,9 @@ interface RecordItem {
   raw_content: string;
   images: Array<{ url: string; description: string; src: string; status: string }>;
   final_prompt: string;
-  text_model: string;
-  vision_model: string;
+  answer_model: string;
+  caption_model: string;
+  vision: boolean;
   total_time_ms: number;
 }
 

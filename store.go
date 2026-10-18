@@ -32,14 +32,15 @@ type Record struct {
 	Reasoning        string      `json:"reasoning"`
 	RawContent       string      `json:"raw_content"`
 	Answer           string      `json:"answer"`
-	TextModel        string      `json:"text_model"`
-	VisionModel      string      `json:"vision_model"`
+	AnswerModel      string      `json:"answer_model"`
+	CaptionModel     string      `json:"caption_model"`
+	Vision           bool        `json:"vision"`
 	TotalTimeMS      int64       `json:"total_time_ms"`
 }
 
 type Store struct{ db *sql.DB }
 
-const recordColumns = "id, timestamp, type, status, raw_title, raw_options, processed_title, processed_options, images, final_prompt, reasoning, raw_content, answer, text_model, vision_model, total_time_ms"
+const recordColumns = "id, timestamp, type, status, raw_title, raw_options, processed_title, processed_options, images, final_prompt, reasoning, raw_content, answer, answer_model, caption_model, vision, total_time_ms"
 
 func openStore(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", filepath.ToSlash(path))
@@ -53,7 +54,8 @@ func openStore(path string) (*Store, error) {
 		status TEXT DEFAULT 'complete', raw_title TEXT DEFAULT '', raw_options TEXT DEFAULT '',
 		processed_title TEXT DEFAULT '', processed_options TEXT DEFAULT '', images TEXT DEFAULT '[]',
 		final_prompt TEXT DEFAULT '', reasoning TEXT DEFAULT '', raw_content TEXT DEFAULT '',
-		answer TEXT DEFAULT '', text_model TEXT DEFAULT '', vision_model TEXT DEFAULT '', total_time_ms INTEGER DEFAULT 0);`); err != nil {
+		answer TEXT DEFAULT '', answer_model TEXT DEFAULT '', caption_model TEXT DEFAULT '',
+		vision INTEGER DEFAULT 0, total_time_ms INTEGER DEFAULT 0);`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -88,6 +90,23 @@ func openStore(path string) (*Store, error) {
 			}
 		}
 	}
+	// 旧库中的模型列更名为回答模型与图片转述模型。
+	for old, current := range map[string]string{"text_model": "answer_model", "vision_model": "caption_model"} {
+		if cols[old] && !cols[current] {
+			if _, err = db.Exec("ALTER TABLE records RENAME COLUMN " + old + " TO " + current); err != nil {
+				db.Close()
+				return nil, err
+			}
+			delete(cols, old)
+			cols[current] = true
+		}
+	}
+	if !cols["vision"] {
+		if _, err = db.Exec("ALTER TABLE records ADD COLUMN vision INTEGER DEFAULT 0"); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if !cols["status"] {
 		if _, err = db.Exec("UPDATE records SET status='complete' WHERE status='' OR status IS NULL"); err != nil {
 			db.Close()
@@ -114,9 +133,9 @@ func (s *Store) complete(ctx context.Context, r Record) error {
 	}
 	_, err = s.db.ExecContext(ctx, `UPDATE records SET timestamp=?, type=?, status='complete', raw_title=?, raw_options=?,
 		processed_title=?, processed_options=?, images=?, final_prompt=?, reasoning=?, raw_content=?, answer=?,
-		text_model=?, vision_model=?, total_time_ms=? WHERE id=?`, r.Timestamp, r.Type, r.RawTitle, r.RawOptions,
+		answer_model=?, caption_model=?, vision=?, total_time_ms=? WHERE id=?`, r.Timestamp, r.Type, r.RawTitle, r.RawOptions,
 		r.ProcessedTitle, r.ProcessedOptions, string(images), r.FinalPrompt, r.Reasoning, r.RawContent,
-		r.Answer, r.TextModel, r.VisionModel, r.TotalTimeMS, r.ID)
+		r.Answer, r.AnswerModel, r.CaptionModel, r.Vision, r.TotalTimeMS, r.ID)
 	return err
 }
 
@@ -124,8 +143,8 @@ func scanRecord(row interface{ Scan(...any) error }) (Record, error) {
 	var r Record
 	var images string
 	err := row.Scan(&r.ID, &r.Timestamp, &r.Type, &r.Status, &r.RawTitle, &r.RawOptions, &r.ProcessedTitle,
-		&r.ProcessedOptions, &images, &r.FinalPrompt, &r.Reasoning, &r.RawContent, &r.Answer, &r.TextModel,
-		&r.VisionModel, &r.TotalTimeMS)
+		&r.ProcessedOptions, &images, &r.FinalPrompt, &r.Reasoning, &r.RawContent, &r.Answer, &r.AnswerModel,
+		&r.CaptionModel, &r.Vision, &r.TotalTimeMS)
 	if err != nil {
 		return r, err
 	}
@@ -166,12 +185,12 @@ func (s *Store) count(ctx context.Context) (int, error) {
 }
 
 type Stats struct {
-	Total       int    `json:"total"`
-	Today       int    `json:"today"`
-	AvgTimeMS   int64  `json:"avg_time_ms"`
-	SuccessRate int    `json:"success_rate"`
-	TextModel   string `json:"text_model"`
-	VisionModel string `json:"vision_model"`
+	Total        int    `json:"total"`
+	Today        int    `json:"today"`
+	AvgTimeMS    int64  `json:"avg_time_ms"`
+	SuccessRate  int    `json:"success_rate"`
+	AnswerModel  string `json:"answer_model"`
+	CaptionModel string `json:"caption_model"`
 }
 
 func (s *Store) stats(ctx context.Context) (Stats, error) {
@@ -189,11 +208,11 @@ func (s *Store) stats(ctx context.Context) (Stats, error) {
 	if v.Total > 0 {
 		v.SuccessRate = int(float64(success)/float64(v.Total)*100 + 0.5)
 	}
-	v.TextModel, v.VisionModel = "-", "-"
+	v.AnswerModel, v.CaptionModel = "-", "-"
 	for _, item := range []struct {
 		column string
 		dest   *string
-	}{{"text_model", &v.TextModel}, {"vision_model", &v.VisionModel}} {
+	}{{"answer_model", &v.AnswerModel}, {"caption_model", &v.CaptionModel}} {
 		err := s.db.QueryRowContext(ctx, "SELECT "+item.column+" FROM records WHERE status='complete' AND "+item.column+" != '' ORDER BY id DESC LIMIT 1").Scan(item.dest)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return v, err

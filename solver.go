@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/onprs/OCS-Tiku/internal/catalog"
 )
 
 var (
@@ -17,10 +19,12 @@ var (
 	optionLabel   = regexp.MustCompile(`^[A-Za-z][.、)）:：\s]+`)
 )
 
+// Solver 完成一次答题：图片处理、模型调用与答案解析。
 type Solver struct {
-	config *Config
-	models *ModelClient
-	images *ImageProcessor
+	config  *Config
+	models  *ModelClient
+	images  *ImageProcessor
+	catalog *catalog.Store
 }
 
 func questionLabel(kind string) string {
@@ -124,7 +128,9 @@ func extractAnswer(content, reasoning, kind string) string {
 	return raw
 }
 
-func directContent(title, options, kind string, images map[string][]byte) []contentPart {
+// directContent 构造直传图片的消息内容：图片交给回答模型自行理解。
+// 没有可用图片时返回纯文本，与文本请求保持一致的消息格式。
+func directContent(title, options, kind string, images map[string][]byte) any {
 	parts := []contentPart{{Type: "text", Text: "题型：" + questionLabel(kind) + "\n题目：" + replaceURLs(cleanTitle(title))}}
 	for _, raw := range extractImageURLs(title) {
 		if data := images[raw]; data != nil {
@@ -146,7 +152,17 @@ func directContent(title, options, kind string, images map[string][]byte) []cont
 			}
 		}
 	}
-	return append(parts, textPart("请输出<answer>X</answer>"))
+	parts = append(parts, textPart("请输出<answer>X</answer>"))
+	for _, part := range parts {
+		if part.Type == "image_url" {
+			return parts
+		}
+	}
+	text := "题型：" + questionLabel(kind) + "\n题目：" + replaceURLs(cleanTitle(title))
+	if kind != "completion" && strings.TrimSpace(options) != "" {
+		text += "\n选项：\n" + labelOptions(replaceURLs(options))
+	}
+	return text + "\n请输出<answer>X</answer>"
 }
 
 func replaceURLs(text string) string {
@@ -156,37 +172,80 @@ func replaceURLs(text string) string {
 	return text
 }
 
-func (s *Solver) solve(ctx context.Context, title, options, kind string) (r Record, solveErr error) {
+// solve 完成一次答题。图片路径由回答模型的视觉能力决定：
+// 具备视觉能力时图片直接交给回答模型，否则交给图片转述模型转为文字。
+func (s *Solver) solve(ctx context.Context, title, options, kind string) (result Record, solveErr error) {
 	cfg := s.config.snapshot()
 	start := time.Now()
-	r = Record{Timestamp: start.Format("2006-01-02T15:04:05.000000"), Type: kind, Status: "complete",
+	answerService := cfg.Services[cfg.Answer.Answer.Service]
+	captionService := cfg.Services[cfg.Answer.Caption.Service]
+	capability := s.capability(answerService, cfg.Answer.Answer)
+	direct := capability.Vision
+
+	result = Record{
+		Timestamp: start.Format("2006-01-02T15:04:05.000000"), Type: kind, Status: "complete",
 		RawTitle: title, RawOptions: options, ProcessedTitle: title, ProcessedOptions: options,
-		Images: []ImageInfo{}, TextModel: displayName(cfg.Models.Text), VisionModel: displayName(cfg.Models.Vision)}
-	direct := cfg.Answer.Mode == "direct" && cfg.Models.Vision.Provider != ""
-	defer func() { r.TotalTimeMS = time.Since(start).Milliseconds() }()
-	processedTitle, processedOptions, infos, images := s.images.process(ctx, title, options, cfg.Models.Vision, s.models, direct)
-	r.ProcessedTitle, r.ProcessedOptions, r.Images = processedTitle, processedOptions, infos
+		Images: []ImageInfo{}, Vision: capability.Vision,
+		AnswerModel: modelLabel(answerService, cfg.Answer.Answer), CaptionModel: captionLabel(captionService, cfg.Answer.Caption),
+	}
+	defer func() { result.TotalTimeMS = time.Since(start).Milliseconds() }()
+
+	var caption *captionTask
+	if cfg.Answer.Caption.Model != "" {
+		caption = &captionTask{prompt: cfg.Answer.CaptionPrompt, service: captionService, model: cfg.Answer.Caption, client: s.models}
+	}
+	processedTitle, processedOptions, infos, images, err := s.images.process(ctx, title, options, caption, direct)
+	result.ProcessedTitle, result.ProcessedOptions, result.Images = processedTitle, processedOptions, infos
+	if err != nil {
+		result.Answer = "ERROR: " + err.Error()
+		return result, err
+	}
+
 	var content, reasoning string
-	var err error
 	if direct {
-		r.TextModel = displayName(cfg.Models.Vision) + " (direct)"
-		r.FinalPrompt = fmt.Sprintf("题型：%s\n题目：%s\n选项：\n%s\n[Direct 模式: 含 %d 张原图，直接发给视觉模型作答]", questionLabel(kind), title, options, len(images))
-		content, reasoning, err = s.models.chat(ctx, cfg.Models.Vision,
+		result.FinalPrompt = buildPrompt(title, options, kind)
+		if len(images) > 0 {
+			result.FinalPrompt += fmt.Sprintf("\n[图片直传: 含 %d 张原图]", len(images))
+		}
+		content, reasoning, err = s.models.chat(ctx, answerService, cfg.Answer.Answer,
 			[]chatMessage{{Role: "system", Content: cfg.Answer.SystemPrompt}, {Role: "user", Content: directContent(title, options, kind, images)}}, 0.1, 0)
 	} else {
-		if cfg.Models.Text.Provider == "" {
-			err = errors.New("文本模型未配置")
-		} else {
-			r.FinalPrompt = buildPrompt(processedTitle, processedOptions, kind)
-			content, reasoning, err = s.models.chat(ctx, cfg.Models.Text,
-				[]chatMessage{{Role: "system", Content: cfg.Answer.SystemPrompt}, {Role: "user", Content: r.FinalPrompt}}, 0.1, 0)
-		}
+		result.FinalPrompt = buildPrompt(processedTitle, processedOptions, kind)
+		content, reasoning, err = s.models.chat(ctx, answerService, cfg.Answer.Answer,
+			[]chatMessage{{Role: "system", Content: cfg.Answer.SystemPrompt}, {Role: "user", Content: result.FinalPrompt}}, 0.1, 0)
 	}
-	r.RawContent, r.Reasoning = content, reasoning
+	result.RawContent, result.Reasoning = content, reasoning
 	if err != nil {
-		r.Answer = "ERROR: " + err.Error()
-		return r, err
+		result.Answer = "ERROR: " + err.Error()
+		return result, err
 	}
-	r.Answer = extractAnswer(content, reasoning, kind)
-	return r, nil
+	result.Answer = extractAnswer(content, reasoning, kind)
+	return result, nil
 }
+
+// modelLabel 返回回答模型的展示名，未配置时为空。
+func modelLabel(service ServiceConfig, model ModelConfig) string {
+	if model.Model == "" {
+		return ""
+	}
+	name := service.Name
+	if name == "" {
+		name = "未知服务"
+	}
+	return name + " (" + model.Model + ")"
+}
+
+// captionLabel 返回图片转述模型的展示名，未配置时为空。
+func captionLabel(service ServiceConfig, model ModelConfig) string {
+	if model.Model == "" {
+		return ""
+	}
+	return modelLabel(service, model)
+}
+
+// answerDisabled 判断回答模型是否未配置。
+func answerDisabled(model ModelConfig) bool {
+	return strings.TrimSpace(model.Model) == "" || strings.TrimSpace(model.Service) == ""
+}
+
+var errAnswerMissing = errors.New("请先在设置中配置回答模型")

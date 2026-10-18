@@ -19,6 +19,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/onprs/OCS-Tiku/internal/catalog"
 	_ "modernc.org/sqlite"
 )
 
@@ -45,12 +46,34 @@ func setupServer(t *testing.T) (*Server, *httptest.Server, string) {
 	if err := os.WriteFile(filepath.Join(assets, "index.html"), []byte("<html>OCS app</html>"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	modelCatalog, err := catalog.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	models := newModelClient()
-	s := &Server{config: cfg, store: store, models: models, assets: assets, imageDir: images.dir}
-	s.solver = &Solver{config: cfg, models: models, images: images}
+	s := &Server{config: cfg, store: store, models: models, catalog: modelCatalog,
+		assets: assets, imageDir: images.dir}
+	s.solver = &Solver{config: cfg, models: models, images: images, catalog: modelCatalog}
 	web := httptest.NewServer(s.handler())
 	t.Cleanup(web.Close)
 	return s, web, dir
+}
+
+// configureAnswer 写入服务条目并把它设为回答模型。
+func configureAnswer(t *testing.T, s *Server, service ServiceConfig, model ModelConfig) {
+	t.Helper()
+	if service.Name == "" {
+		service.Name = "测试服务"
+	}
+	if err := s.config.updateService("fake", service); err != nil {
+		t.Fatal(err)
+	}
+	model.Service = "fake"
+	answer := s.config.snapshot().Answer
+	answer.Answer = model
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func requestJSON(t *testing.T, web *httptest.Server, method, path string, value any, status int, out any) {
@@ -95,11 +118,9 @@ func TestSearchAndRecords(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "<answer>A#B</answer>", "reasoning_content": "思考"}}}})
 	}))
 	defer fake.Close()
-	cfg := s.config.snapshot().Models.Text
-	cfg.Provider, cfg.BaseURL, cfg.APIKey, cfg.Model = "openai_compat", fake.URL+"/v1", "demo", "test-text"
-	if err := s.config.updateModel("text", cfg); err != nil {
-		t.Fatal(err)
-	}
+	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL + "/v1", APIKey: "demo", Vendor: "openai"},
+		ModelConfig{Model: "test-text", Vision: CapabilityAuto, ToolCall: CapabilityAuto})
+
 	var response struct{ Question, Answer string }
 	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "<b>题目</b>", "options": "选择一\n选择二", "type": "multiple"}, 200, &response)
 	if response.Answer != "A#B" || response.Question != "<b>题目</b>" {
@@ -117,7 +138,7 @@ func TestSearchAndRecords(t *testing.T) {
 	id := records.Records[0].ID
 	var detail Record
 	requestJSON(t, web, "GET", "/api/records/"+itoa(id), nil, 200, &detail)
-	if detail.Answer != "A#B" || detail.Status != "complete" {
+	if detail.Answer != "A#B" || detail.Status != "complete" || detail.AnswerModel != "测试服务 (test-text)" {
 		t.Fatalf("详情异常: %+v", detail)
 	}
 	var recent []Record
@@ -129,7 +150,7 @@ func TestSearchAndRecords(t *testing.T) {
 	requestJSON(t, web, "GET", "/api/records/999", nil, 404, nil)
 	var stats Stats
 	requestJSON(t, web, "GET", "/api/stats", nil, 200, &stats)
-	if stats.Total != 1 || stats.Today != 1 || stats.SuccessRate != 100 || stats.TextModel != "OpenAI Compat (test-text)" {
+	if stats.Total != 1 || stats.Today != 1 || stats.SuccessRate != 100 || stats.AnswerModel != "测试服务 (test-text)" || stats.CaptionModel != "-" {
 		t.Fatalf("统计异常: %+v", stats)
 	}
 	var dashboard struct {
@@ -141,9 +162,8 @@ func TestSearchAndRecords(t *testing.T) {
 	}
 }
 
-func itoa(v int64) string { return strconv.FormatInt(v, 10) }
-
-func TestImagesModesAndSettings(t *testing.T) {
+// TestImagePaths 覆盖图片的三种处理路径：直传、转述、能力缺失报错。
+func TestImagePaths(t *testing.T) {
 	s, web, dir := setupServer(t)
 	var mu sync.Mutex
 	var calls []map[string]any
@@ -163,30 +183,27 @@ func TestImagesModesAndSettings(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": answer}}}})
 	}))
 	defer fake.Close()
-	text := s.config.snapshot().Models.Text
-	text.Provider, text.APIKey, text.Model, text.BaseURL = "openai_compat", "demo", "text", fake.URL
-	vision := s.config.snapshot().Models.Vision
-	vision.Provider, vision.APIKey, vision.Model, vision.BaseURL = "openai_vl", "demo", "vision", fake.URL
-	requestJSON(t, web, "PUT", "/api/settings/text", text, 200, nil)
-	requestJSON(t, web, "PUT", "/api/settings/vision", vision, 200, nil)
-	requestJSON(t, web, "GET", "/api/test-text", nil, 200, nil)
-	requestJSON(t, web, "GET", "/api/test-vision", nil, 200, nil)
-	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+
+	image := image.NewRGBA(image.Rect(0, 0, 2, 2))
 	var pngData bytes.Buffer
-	if err := png.Encode(&pngData, img); err != nil {
+	if err := png.Encode(&pngData, image); err != nil {
 		t.Fatal(err)
 	}
 	s.solver.images.fetch = func(_ context.Context, _ string) ([]byte, error) { return pngData.Bytes(), nil }
 	input := map[string]string{"title": "题目 https://example.org/a.png", "options": "答案甲\n答案乙", "type": "single"}
+
+	// 场景一：回答模型标注为支持图片，图片直接交给回答模型。
+	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL, APIKey: "demo"},
+		ModelConfig{Model: "vision-model", Vision: CapabilityOn, ToolCall: CapabilityAuto})
 	var result struct{ Question, Answer string }
 	requestJSON(t, web, "POST", "/api/search", input, 200, &result)
-	if result.Answer != "B" || !strings.Contains(result.Question, "[图片: 图中文字]") {
-		t.Fatalf("分步识别异常: %+v", result)
+	if result.Answer != "B" || strings.Contains(result.Question, "[图片:") {
+		t.Fatalf("直传路径异常: %+v", result)
 	}
 	var item Record
 	requestJSON(t, web, "GET", "/api/records/1", nil, 200, &item)
-	if len(item.Images) != 1 || item.Images[0].Status != "done" || !strings.HasPrefix(item.Images[0].Src, "/images/") {
-		t.Fatalf("图片记录异常: %+v", item.Images)
+	if !item.Vision || item.CaptionModel != "" || len(item.Images) != 1 || item.Images[0].Status != "done" || !strings.HasPrefix(item.Images[0].Src, "/images/") {
+		t.Fatalf("直传记录异常: %+v", item)
 	}
 	resp, err := http.Get(web.URL + item.Images[0].Src)
 	if err != nil {
@@ -196,44 +213,120 @@ func TestImagesModesAndSettings(t *testing.T) {
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/png" {
 		t.Fatalf("图片读取失败: %d", resp.StatusCode)
 	}
-	cfg := s.config.snapshot().Answer
-	cfg.Mode = "direct"
-	requestJSON(t, web, "PUT", "/api/settings/answer", cfg, 200, nil)
-	requestJSON(t, web, "POST", "/api/search", input, 200, &result)
-	requestJSON(t, web, "GET", "/api/records/2", nil, 200, &item)
-	if !strings.Contains(item.TextModel, "(direct)") || item.Images[0].Status != "done" || item.TotalTimeMS < 0 {
-		t.Fatalf("直答记录异常: %+v", item)
+
+	// 场景二：回答模型不支持图片但配置了转述模型，图片先转述再作答。
+	answer := s.config.snapshot().Answer
+	answer.Caption = ModelConfig{Service: "fake", Model: "caption-model", Vision: CapabilityOn, ToolCall: CapabilityAuto}
+	answer.Answer.Vision = CapabilityOff
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
 	}
+	requestJSON(t, web, "POST", "/api/search", input, 200, &result)
+	if result.Answer != "B" || !strings.Contains(result.Question, "[图片: 图中文字]") {
+		t.Fatalf("转述路径异常: %+v", result)
+	}
+	requestJSON(t, web, "GET", "/api/records/2", nil, 200, &item)
+	if item.Vision || item.CaptionModel != "测试服务 (caption-model)" {
+		t.Fatalf("转述记录异常: %+v", item)
+	}
+
+	// 场景三：既无图片能力也没有转述模型时返回错误并记录。
+	answer = s.config.snapshot().Answer
+	answer.Caption = ModelConfig{Vision: CapabilityAuto, ToolCall: CapabilityAuto}
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	var failure map[string]string
+	requestJSON(t, web, "POST", "/api/search", input, 500, &failure)
+	if !strings.Contains(failure["error"], "图片转述") {
+		t.Fatalf("能力缺失响应异常: %v", failure)
+	}
+	requestJSON(t, web, "GET", "/api/records/3", nil, 200, &item)
+	if !strings.HasPrefix(item.Answer, "ERROR:") {
+		t.Fatalf("失败记录异常: %+v", item)
+	}
+
+	// 直传场景应发送 image_url 结构。
 	mu.Lock()
 	defer mu.Unlock()
 	foundImage := false
 	for _, call := range calls {
 		messages := call["messages"].([]any)
-		if len(messages) == 2 {
-			user := messages[1].(map[string]any)
-			if parts, ok := user["content"].([]any); ok {
-				for _, part := range parts {
-					if part.(map[string]any)["type"] == "image_url" {
-						foundImage = true
-					}
+		if len(messages) != 2 {
+			continue
+		}
+		user := messages[1].(map[string]any)
+		if parts, ok := user["content"].([]any); ok {
+			for _, part := range parts {
+				if part.(map[string]any)["type"] == "image_url" {
+					foundImage = true
 				}
 			}
 		}
 	}
 	if !foundImage {
-		t.Fatal("直答模式没有发送图片")
+		t.Fatal("直传路径没有发送图片")
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
-	if err != nil || !strings.Contains(string(b), "mode: direct") {
+	config, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if err != nil || !strings.Contains(string(config), "caption_prompt") {
 		t.Fatalf("设置未保存: %v", err)
 	}
 }
 
-func TestFailedSearchAndRoutes(t *testing.T) {
+func TestServiceAndModelSettings(t *testing.T) {
 	_, web, _ := setupServer(t)
+	var view settingsView
+	requestJSON(t, web, "GET", "/api/settings", nil, 200, &view)
+	if len(view.Templates) == 0 || len(view.Protocols) != len(protocols) || view.Catalog.Entries == 0 {
+		t.Fatalf("设置视图异常: templates=%d protocols=%d catalog=%+v", len(view.Templates), len(view.Protocols), view.Catalog)
+	}
+	requestJSON(t, web, "PUT", "/api/services/relay", ServiceConfig{Name: "中转", Protocol: ProtocolOpenAIChat, BaseURL: "https://relay.example.com/v1", APIKey: "k"}, 200, nil)
+	requestJSON(t, web, "PUT", "/api/services/bad", ServiceConfig{Name: "错误", Protocol: "unknown-protocol", BaseURL: "https://x.example.com"}, 400, nil)
+	requestJSON(t, web, "PUT", "/api/services/bad", ServiceConfig{Name: "错误", Protocol: ProtocolOpenAIChat, BaseURL: "ftp://x.example.com"}, 400, nil)
+	requestJSON(t, web, "PUT", "/api/services/bad", ServiceConfig{Name: "错误", Protocol: ProtocolOllamaChat, BaseURL: "http://127.0.0.1:11434"}, 200, nil)
+	requestJSON(t, web, "DELETE", "/api/services/bad", nil, 200, nil)
+	requestJSON(t, web, "DELETE", "/api/services/deepseek", nil, 400, nil)
+
+	var capability Capability
+	requestJSON(t, web, "GET", "/api/capability?service=relay&model=gpt-5&vision=auto&tool_call=auto", nil, 200, &capability)
+	if !capability.Matched || capability.Entry == "" {
+		t.Fatalf("能力查询异常: %+v", capability)
+	}
+	requestJSON(t, web, "GET", "/api/capability?service=relay&model=gpt-5&vision=off&tool_call=on", nil, 200, &capability)
+	if capability.Vision || !capability.ToolCall {
+		t.Fatalf("能力覆盖未生效: %+v", capability)
+	}
+	requestJSON(t, web, "GET", "/api/capability?service=absent&model=gpt-5", nil, 400, nil)
+
+	var vendors []vendorInfo
+	requestJSON(t, web, "GET", "/api/models/vendors", nil, 200, &vendors)
+	if len(vendors) < 100 {
+		t.Fatalf("厂商列表异常: %d", len(vendors))
+	}
+	var list struct {
+		Vendor string          `json:"vendor"`
+		Name   string          `json:"name"`
+		Models []catalog.Entry `json:"models"`
+	}
+	requestJSON(t, web, "GET", "/api/models/list?vendor=deepseek", nil, 200, &list)
+	if len(list.Models) == 0 || list.Name == "" {
+		t.Fatalf("模型列表异常: %+v", list)
+	}
+	requestJSON(t, web, "GET", "/api/models/list", nil, 400, nil)
+
+	var status catalog.Status
+	requestJSON(t, web, "GET", "/api/models/status", nil, 200, &status)
+	if status.Entries == 0 || status.Origin == "" {
+		t.Fatalf("模型库状态异常: %+v", status)
+	}
+}
+
+func TestFailedSearchAndRoutes(t *testing.T) {
+	s, web, _ := setupServer(t)
+	// 默认配置指向 deepseek 但没有密钥，调用时返回错误并记录。
 	var failure map[string]string
-	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "未配置的模型"}, 500, &failure)
-	if failure["answer"] != "" || !strings.Contains(failure["error"], "API Key") {
+	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "缺少密钥"}, 500, &failure)
+	if !strings.Contains(failure["error"], "模型密钥") {
 		t.Fatalf("错误响应异常: %v", failure)
 	}
 	var item Record
@@ -241,10 +334,22 @@ func TestFailedSearchAndRoutes(t *testing.T) {
 	if !strings.HasPrefix(item.Answer, "ERROR:") {
 		t.Fatalf("错误记录未保存: %+v", item)
 	}
-	var stats Stats
-	requestJSON(t, web, "GET", "/api/stats", nil, 200, &stats)
-	if stats.SuccessRate != 0 {
-		t.Fatalf("失败计数异常: %+v", stats)
+	// 清空回答模型后请求应直接拒绝并且不产生记录。
+	answer := s.config.snapshot().Answer
+	answer.Answer = ModelConfig{Vision: CapabilityAuto, ToolCall: CapabilityAuto}
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "未配置的模型"}, 400, &failure)
+	if !strings.Contains(failure["error"], "回答模型") {
+		t.Fatalf("错误响应异常: %v", failure)
+	}
+	var records struct {
+		Total int `json:"total"`
+	}
+	requestJSON(t, web, "GET", "/api/records", nil, 200, &records)
+	if records.Total != 1 {
+		t.Fatalf("未配置模型时不应产生记录: %+v", records)
 	}
 	var conf []map[string]any
 	requestJSON(t, web, "GET", "/api/config", nil, 200, &conf)
@@ -277,7 +382,7 @@ func TestOldDatabaseMigration(t *testing.T) {
 		raw_title TEXT DEFAULT '', raw_options TEXT DEFAULT '', processed_title TEXT DEFAULT '', processed_options TEXT DEFAULT '',
 		images TEXT DEFAULT '[]', final_prompt TEXT DEFAULT '', answer TEXT DEFAULT '', text_model TEXT DEFAULT '',
 		vision_model TEXT DEFAULT '', total_time_ms INTEGER DEFAULT 0);
-		INSERT INTO records (timestamp,type,answer) VALUES (datetime('now'),'single','A')`)
+		INSERT INTO records (timestamp,type,answer,text_model,vision_model) VALUES (datetime('now'),'single','A','旧回答模型','旧转述模型')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +393,7 @@ func TestOldDatabaseMigration(t *testing.T) {
 	}
 	defer store.close()
 	r, err := store.get(context.Background(), 1)
-	if err != nil || r.Answer != "A" || r.Status != "complete" {
+	if err != nil || r.Answer != "A" || r.Status != "complete" || r.AnswerModel != "旧回答模型" || r.CaptionModel != "旧转述模型" {
 		t.Fatalf("旧记录迁移失败: %+v %v", r, err)
 	}
 }
@@ -341,3 +446,5 @@ func TestBlockedImageTargets(t *testing.T) {
 		}
 	}
 }
+
+func itoa(v int64) string { return strconv.FormatInt(v, 10) }
