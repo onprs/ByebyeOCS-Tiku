@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"time"
 
@@ -133,7 +132,7 @@ func scanRecord(row interface{ Scan(...any) error }) (Record, error) {
 	r.Images = []ImageInfo{}
 	if images != "" {
 		if err = json.Unmarshal([]byte(images), &r.Images); err != nil {
-			return r, fmt.Errorf("记录 %d 图片数据无效: %w", r.ID, err)
+			r.Images = []ImageInfo{}
 		}
 	}
 	return r, nil

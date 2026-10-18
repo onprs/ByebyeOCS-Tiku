@@ -77,7 +77,7 @@ func (c *ModelClient) chat(ctx context.Context, cfg ModelConfig, messages []chat
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	limited := io.LimitReader(resp.Body, 2<<20)
+	limited := io.LimitReader(resp.Body, 4<<20)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var failure struct {
 			Error struct {

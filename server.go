@@ -84,6 +84,12 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	if request.Type == "" {
 		request.Type = "single"
 	}
+	switch request.Type {
+	case "single", "multiple", "judgement", "completion":
+	default:
+		jsonError(w, http.StatusBadRequest, errors.New("题目类型无效"))
+		return
+	}
 	id, err := s.store.pending(r.Context(), request.Type)
 	if err != nil {
 		jsonError(w, 500, err)

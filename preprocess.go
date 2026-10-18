@@ -164,7 +164,7 @@ func shrinkImage(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Width < 1 || cfg.Height < 1 || int64(cfg.Width)*int64(cfg.Height) > 40000000 {
+	if cfg.Width < 1 || cfg.Height < 1 || int64(cfg.Width)*int64(cfg.Height) > 16000000 {
 		return nil, errors.New("图片尺寸无效")
 	}
 	original, format, err := image.Decode(bytes.NewReader(data))
@@ -223,7 +223,17 @@ func (p *ImageProcessor) save(raw string, data []byte) (string, error) {
 	return "/images/" + name, nil
 }
 
-func extractImageURLs(text string) []string { return imageURLPattern.FindAllString(text, -1) }
+func extractImageURLs(text string) []string {
+	matches := imageURLPattern.FindAllString(text, -1)
+	result := make([]string, 0, len(matches))
+	for _, raw := range matches {
+		raw = strings.TrimRight(raw, ".,;:!?)]}\"'")
+		if raw != "" {
+			result = append(result, raw)
+		}
+	}
+	return result
+}
 
 func (p *ImageProcessor) process(ctx context.Context, title, options string, vision ModelConfig, model *ModelClient, direct bool) (string, string, []ImageInfo, map[string][]byte) {
 	urls := append(extractImageURLs(title), extractImageURLs(options)...)

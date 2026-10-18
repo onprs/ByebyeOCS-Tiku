@@ -133,10 +133,15 @@ func directContent(title, options, kind string, images map[string][]byte) []cont
 	}
 	if kind != "completion" && strings.TrimSpace(options) != "" {
 		parts = append(parts, textPart("选项：\n"+labelOptions(replaceURLs(options))))
-		for i, line := range strings.Split(options, "\n") {
+		optionIndex := -1
+		for _, line := range strings.Split(options, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			optionIndex++
 			for _, raw := range extractImageURLs(line) {
 				if data := images[raw]; data != nil {
-					parts = append(parts, textPart(fmt.Sprintf("[选项 %c 的图片]", 'A'+i)), imagePart(data))
+					parts = append(parts, textPart(fmt.Sprintf("[选项 %c 的图片]", 'A'+optionIndex)), imagePart(data))
 				}
 			}
 		}
@@ -145,7 +150,10 @@ func directContent(title, options, kind string, images map[string][]byte) []cont
 }
 
 func replaceURLs(text string) string {
-	return imageURLPattern.ReplaceAllString(text, "[图]")
+	for _, raw := range extractImageURLs(text) {
+		text = strings.ReplaceAll(text, raw, "[图]")
+	}
+	return text
 }
 
 func (s *Solver) solve(ctx context.Context, title, options, kind string) (r Record, solveErr error) {
