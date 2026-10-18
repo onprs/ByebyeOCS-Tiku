@@ -21,6 +21,10 @@ images/
 *.log
 logs/
 
+# 模型库在线更新缓存
+/models.json.gz
+/models.meta.json
+
 # 凭据与证书
 .env*
 !.env.example
