@@ -21,6 +21,7 @@ func testCatalog(t *testing.T) *Catalog {
 			"anthropic/claude-3-5-sonnet":          {Name: "Claude 3.5 Sonnet", Vision: true, Canonical: "anthropic/claude-3-5-sonnet-20241022"},
 			"anthropic/claude-3-5-sonnet-20241022": {Name: "Claude 3.5 Sonnet", Vision: true, ToolCall: true},
 			"anthropic/claude-3-5-haiku":           {Name: "Claude 3.5 Haiku", ToolCall: true},
+			"anthropic/claude-3-7-sonnet-20250219": {Name: "Claude 3.7 Sonnet", Vision: true, Spec: true},
 			"relay/deepseek-chat":                  {Name: "DeepSeek Chat", ToolCall: true},
 		},
 	}
@@ -96,6 +97,18 @@ func TestVendorModels(t *testing.T) {
 	}
 	if models[0].Name != "GPT-4o" || models[1].Name != "GPT-4o mini" {
 		t.Errorf("排序结果 = %q, %q", models[0].Name, models[1].Name)
+	}
+	// 厂商无关层的历史条目不应出现在候选列表中，但仍可用于能力查询。
+	for _, entry := range c.VendorModels("anthropic") {
+		if entry.Spec {
+			t.Errorf("候选列表包含规范条目 %s", entry.ID)
+		}
+	}
+	if len(c.VendorModels("anthropic")) != 3 {
+		t.Errorf("anthropic 候选数 = %d，期望 3", len(c.VendorModels("anthropic")))
+	}
+	if match := c.Lookup("anthropic", "claude-3-7-sonnet"); !match.Found || !match.Entry.Spec {
+		t.Errorf("规范条目应可用于能力查询: %+v", match)
 	}
 	if name := c.VendorName("openai"); name != "OpenAI" {
 		t.Errorf("VendorName = %q", name)

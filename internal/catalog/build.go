@@ -45,8 +45,11 @@ func Build(raw []byte, generated string) (*Snapshot, error) {
 		Models:    make(map[string]SnapshotEntry, len(file.Providers)+len(file.Models)),
 	}
 	// 厂商无关的规范条目先写入，随后由厂商条目覆盖同名条目。
+	// 规范条目只用于能力参考与规范标识重定向，不进入厂商候选列表。
 	for id, model := range file.Models {
-		snapshot.Models[id] = convertModel(model)
+		entry := convertModel(model)
+		entry.Spec = true
+		snapshot.Models[id] = entry
 		vendor, _ := splitID(id)
 		if vendor != "" && snapshot.Vendors[vendor] == "" {
 			snapshot.Vendors[vendor] = vendor

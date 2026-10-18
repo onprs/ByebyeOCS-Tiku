@@ -43,8 +43,15 @@ func TestBuild(t *testing.T) {
 	if relay := snapshot.Models["relay/gpt-4o"]; relay.Canonical != "openai/gpt-4o" {
 		t.Errorf("relay/gpt-4o 规范标识 = %q", relay.Canonical)
 	}
-	if _, ok = snapshot.Models["tencent/hy3"]; !ok {
+	spec, ok := snapshot.Models["tencent/hy3"]
+	if !ok {
 		t.Error("规范条目 tencent/hy3 未合并")
+	}
+	if !spec.Spec {
+		t.Error("规范条目应带 Spec 标记")
+	}
+	if provider := snapshot.Models["openai/gpt-4o"]; provider.Spec {
+		t.Error("厂商条目不应带 Spec 标记")
 	}
 	if snapshot.Vendors["tencent"] != "tencent" {
 		t.Errorf("规范条目厂商未登记: %q", snapshot.Vendors["tencent"])

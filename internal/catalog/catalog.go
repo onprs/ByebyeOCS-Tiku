@@ -42,6 +42,8 @@ type Snapshot struct {
 }
 
 // SnapshotEntry 描述单个模型条目的能力。
+// Spec 标记该条目来自厂商无关层，只用于能力参考与规范标识重定向，
+// 不代表厂商当前提供该模型。
 type SnapshotEntry struct {
 	Name      string `json:"name,omitempty"`
 	Vision    bool   `json:"vision,omitempty"`
@@ -49,6 +51,7 @@ type SnapshotEntry struct {
 	Reasoning bool   `json:"reasoning,omitempty"`
 	Context   int    `json:"context,omitempty"`
 	Canonical string `json:"canonical,omitempty"`
+	Spec      bool   `json:"spec,omitempty"`
 }
 
 // Entry 是索引中的模型条目。
@@ -62,6 +65,8 @@ type Entry struct {
 	Reasoning bool
 	Context   int
 	Canonical string
+	// Spec 为真表示条目来自厂商无关层，仅供能力参考，不在厂商候选中展示。
+	Spec bool
 }
 
 // Match 是一次能力查询的结果。
@@ -110,6 +115,7 @@ func Load(data []byte) (*Catalog, error) {
 		entry := Entry{
 			ID: id, Name: item.Name, Vision: item.Vision, ToolCall: item.ToolCall,
 			Reasoning: item.Reasoning, Context: item.Context, Canonical: item.Canonical,
+			Spec: item.Spec,
 		}
 		vendor, model := splitID(id)
 		entry.Vendor, entry.Model = vendor, model
@@ -117,7 +123,9 @@ func Load(data []byte) (*Catalog, error) {
 		c.byModel[strings.ToLower(model)] = append(c.byModel[strings.ToLower(model)], id)
 		key := normalizeID(model)
 		c.byNorm[key] = append(c.byNorm[key], id)
-		c.byVendor[vendor] = append(c.byVendor[vendor], id)
+		if !entry.Spec {
+			c.byVendor[vendor] = append(c.byVendor[vendor], id)
+		}
 	}
 	return c, nil
 }
@@ -157,7 +165,8 @@ func (c *Catalog) VendorName(id string) string {
 	return id
 }
 
-// VendorModels 返回指定厂商的模型条目，按名称排序。
+// VendorModels 返回厂商当前提供的模型条目，按名称排序。
+// 不含厂商无关层的历史条目。
 func (c *Catalog) VendorModels(vendor string) []Entry {
 	ids := c.byVendor[vendor]
 	result := make([]Entry, 0, len(ids))
