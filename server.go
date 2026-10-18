@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/onprs/OCS-Tiku/internal/catalog"
 )
@@ -112,7 +114,10 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	}
 	result, solveErr := s.solver.solve(withRecordID(r.Context(), id), request.Title, request.Options, request.Type)
 	result.ID = id
-	if err := s.store.complete(r.Context(), result); err != nil {
+	// 客户端可能中途断开，用独立超时保存结果，避免记录停留在 pending。
+	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.complete(saveCtx, result); err != nil {
 		jsonError(w, 500, err)
 		return
 	}

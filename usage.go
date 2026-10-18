@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/cloudwego/eino/callbacks"
@@ -82,20 +83,20 @@ func (s *Solver) saveCall(ctx context.Context, output *model.CallbackOutput, err
 	if !ok || info.RecordID == 0 || s.store == nil {
 		return
 	}
+	now := time.Now()
+	start, hasStart := ctx.Value(callStartKey{}).(time.Time)
+	if !hasStart {
+		start = now
+	}
 	call := ModelCall{
 		RecordID: info.RecordID, Slot: info.Slot, Vendor: info.Vendor,
 		Protocol: info.Protocol, Model: info.Model, Status: "ok",
-		Timestamp: time.Now().Format("2006-01-02T15:04:05.000000"),
-	}
-	if start, ok := ctx.Value(callStartKey{}).(time.Time); ok {
-		call.LatencyMS = time.Since(start).Milliseconds()
+		LatencyMS: now.Sub(start).Milliseconds(),
+		Timestamp: start.Format("2006-01-02T15:04:05.000000"),
 	}
 	if errText != "" {
 		call.Status = "error"
-		if len(errText) > 500 {
-			errText = errText[:500]
-		}
-		call.Error = errText
+		call.Error = truncateText(errText, 500)
 	}
 	if output != nil && output.TokenUsage != nil {
 		call.PromptTokens = output.TokenUsage.PromptTokens
@@ -104,5 +105,7 @@ func (s *Solver) saveCall(ctx context.Context, output *model.CallbackOutput, err
 	}
 	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = s.store.addModelCall(saveCtx, call)
+	if err := s.store.addModelCall(saveCtx, call); err != nil {
+		log.Printf("记录模型调用失败: %v", err)
+	}
 }

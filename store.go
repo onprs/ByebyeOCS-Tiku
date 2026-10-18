@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -80,9 +81,27 @@ func openStore(path string) (*Store, error) {
 		vendor TEXT DEFAULT '', protocol TEXT DEFAULT '', model TEXT DEFAULT '',
 		prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, total_tokens INTEGER DEFAULT 0,
 		latency_ms INTEGER DEFAULT 0, status TEXT DEFAULT 'ok', error TEXT DEFAULT '', timestamp TEXT DEFAULT '');
-		CREATE INDEX IF NOT EXISTS idx_model_calls_record ON model_calls(record_id);`); err != nil {
+		CREATE INDEX IF NOT EXISTS idx_model_calls_record ON model_calls(record_id);
+		CREATE INDEX IF NOT EXISTS idx_model_calls_timestamp ON model_calls(timestamp);
+		CREATE TABLE IF NOT EXISTS usage_totals (id INTEGER PRIMARY KEY CHECK (id=1), total_tokens INTEGER DEFAULT 0);
+		CREATE INDEX IF NOT EXISTS idx_records_timestamp ON records(timestamp);
+		CREATE TABLE IF NOT EXISTS record_totals (id INTEGER PRIMARY KEY CHECK (id=1),
+		complete_count INTEGER DEFAULT 0, success_count INTEGER DEFAULT 0, total_time_ms INTEGER DEFAULT 0);`); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// 首次建立用量总计表时纳入已有调用，之后由每次写入增量维护。
+	var initialized int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM usage_totals WHERE id=1`).Scan(&initialized); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if initialized == 0 {
+		if _, err = db.Exec(`INSERT OR IGNORE INTO usage_totals (id, total_tokens)
+			SELECT 1, COALESCE(SUM(total_tokens),0) FROM model_calls`); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	rows, err := db.Query("PRAGMA table_info(records)")
 	if err != nil {
@@ -144,18 +163,45 @@ func openStore(path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	// 记录统计同样只在首次建立时回填，此时旧库列已补齐。
+	if err = db.QueryRow(`SELECT COUNT(*) FROM record_totals WHERE id=1`).Scan(&initialized); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if initialized == 0 {
+		if _, err = db.Exec(`INSERT OR IGNORE INTO record_totals (id, complete_count, success_count, total_time_ms)
+			SELECT 1,
+				COALESCE(SUM(CASE WHEN status='complete' THEN 1 ELSE 0 END),0),
+				COALESCE(SUM(CASE WHEN status='complete' AND answer NOT LIKE 'ERROR%' THEN 1 ELSE 0 END),0),
+				COALESCE(SUM(CASE WHEN status='complete' THEN total_time_ms ELSE 0 END),0)
+			FROM records`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return &Store{db: db}, nil
 }
 
 func (s *Store) close() error { return s.db.Close() }
 
-// addModelCall 写入一次模型调用的用量记录。
+// addModelCall 写入一次模型调用的用量记录，并在同一事务中累计总用量。
 func (s *Store) addModelCall(ctx context.Context, call ModelCall) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO model_calls (record_id, slot, vendor, protocol, model,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO model_calls (record_id, slot, vendor, protocol, model,
 		prompt_tokens, completion_tokens, total_tokens, latency_ms, status, error, timestamp)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, call.RecordID, call.Slot, call.Vendor, call.Protocol, call.Model,
-		call.PromptTokens, call.CompletionTokens, call.TotalTokens, call.LatencyMS, call.Status, call.Error, call.Timestamp)
-	return err
+		call.PromptTokens, call.CompletionTokens, call.TotalTokens, call.LatencyMS, call.Status, call.Error, call.Timestamp); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO usage_totals (id, total_tokens) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET total_tokens = total_tokens + excluded.total_tokens`, call.TotalTokens); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // modelCalls 返回一条答题记录的全部模型调用。
@@ -187,17 +233,45 @@ func (s *Store) pending(ctx context.Context, kind string) (int64, error) {
 	return r.LastInsertId()
 }
 
+// complete 把待处理记录写成完成状态，并同步更新记录统计。
 func (s *Store) complete(ctx context.Context, r Record) error {
 	images, err := json.Marshal(r.Images)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE records SET timestamp=?, type=?, status='complete', raw_title=?, raw_options=?,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE records SET timestamp=?, type=?, status='complete', raw_title=?, raw_options=?,
 		processed_title=?, processed_options=?, images=?, final_prompt=?, reasoning=?, raw_content=?, answer=?,
-		answer_model=?, caption_model=?, vision=?, agent_error=?, total_time_ms=? WHERE id=?`, r.Timestamp, r.Type, r.RawTitle, r.RawOptions,
-		r.ProcessedTitle, r.ProcessedOptions, string(images), r.FinalPrompt, r.Reasoning, r.RawContent,
-		r.Answer, r.AnswerModel, r.CaptionModel, r.Vision, r.AgentError, r.TotalTimeMS, r.ID)
-	return err
+		answer_model=?, caption_model=?, vision=?, agent_error=?, total_time_ms=? WHERE id=? AND status!='complete'`,
+		r.Timestamp, r.Type, r.RawTitle, r.RawOptions, r.ProcessedTitle, r.ProcessedOptions, string(images),
+		r.FinalPrompt, r.Reasoning, r.RawContent, r.Answer, r.AnswerModel, r.CaptionModel, r.Vision,
+		r.AgentError, r.TotalTimeMS, r.ID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		// 记录不存在或已完成，避免统计重复累计。
+		return tx.Commit()
+	}
+	success := 0
+	if !strings.HasPrefix(strings.ToUpper(r.Answer), "ERROR") {
+		success = 1
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO record_totals (id, complete_count, success_count, total_time_ms)
+		VALUES (1, 1, ?, ?) ON CONFLICT(id) DO UPDATE SET complete_count=complete_count+1,
+		success_count=success_count+excluded.success_count, total_time_ms=total_time_ms+excluded.total_time_ms`,
+		success, r.TotalTimeMS); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func scanRecord(row interface{ Scan(...any) error }) (Record, error) {
@@ -245,10 +319,15 @@ func (s *Store) count(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// escapeLike 转义 LIKE 模式中的通配符。
+func escapeLike(text string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(text)
+}
+
 // search 按关键词检索已成功作答的历史记录，供 Agent 工具使用。
 func (s *Store) search(ctx context.Context, keyword string, limit int) ([]Record, error) {
-	pattern := "%" + keyword + "%"
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordColumns+" FROM records WHERE status='complete' AND answer NOT LIKE 'ERROR%' AND (raw_title LIKE ? OR processed_title LIKE ?) ORDER BY id DESC LIMIT ?", pattern, pattern, limit)
+	pattern := "%" + escapeLike(keyword) + "%"
+	rows, err := s.db.QueryContext(ctx, "SELECT "+recordColumns+" FROM records WHERE status='complete' AND answer NOT LIKE 'ERROR%' AND (raw_title LIKE ? ESCAPE '\\' OR processed_title LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT ?", pattern, pattern, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -277,18 +356,22 @@ type Stats struct {
 
 func (s *Store) stats(ctx context.Context) (Stats, error) {
 	var v Stats
-	var avg float64
-	var success int
+	var complete, success, totalTimeMS int64
 	today := time.Now().Format("2006-01-02")
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN substr(timestamp,1,10)=? THEN 1 ELSE 0 END),0),
-		COALESCE(AVG(total_time_ms),0), COALESCE(SUM(CASE WHEN answer NOT LIKE 'ERROR%' THEN 1 ELSE 0 END),0)
-		FROM records WHERE status='complete'`, today).Scan(&v.Total, &v.Today, &avg, &success)
-	if err != nil {
+	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
+	// 完成记录数与耗时从增量统计表读取，今日记录数按时间范围统计。
+	if err := s.db.QueryRowContext(ctx, `SELECT complete_count, success_count, total_time_ms FROM record_totals WHERE id=1`).
+		Scan(&complete, &success, &totalTimeMS); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return v, err
 	}
-	v.AvgTimeMS = int64(avg + 0.5)
-	if v.Total > 0 {
-		v.SuccessRate = int(float64(success)/float64(v.Total)*100 + 0.5)
+	v.Total = int(complete)
+	if complete > 0 {
+		v.AvgTimeMS = int64(float64(totalTimeMS)/float64(complete) + 0.5)
+		v.SuccessRate = int(float64(success)/float64(complete)*100 + 0.5)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records
+		WHERE status='complete' AND timestamp>=? AND timestamp<?`, today, tomorrow).Scan(&v.Today); err != nil {
+		return v, err
 	}
 	v.AnswerModel, v.CaptionModel = "-", "-"
 	for _, item := range []struct {
@@ -300,9 +383,12 @@ func (s *Store) stats(ctx context.Context) (Stats, error) {
 			return v, err
 		}
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(total_tokens),0),
-		COALESCE(SUM(CASE WHEN substr(timestamp,1,10)=? THEN total_tokens ELSE 0 END),0) FROM model_calls`, today).
-		Scan(&v.TotalTokens, &v.TodayTokens); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(total_tokens,0) FROM usage_totals WHERE id=1`).
+		Scan(&v.TotalTokens); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return v, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(total_tokens),0) FROM model_calls
+		WHERE timestamp>=? AND timestamp<?`, today, tomorrow).Scan(&v.TodayTokens); err != nil {
 		return v, err
 	}
 	return v, nil
@@ -316,7 +402,7 @@ type DailyCount struct {
 func (s *Store) daily(ctx context.Context) ([]DailyCount, error) {
 	start := time.Now().AddDate(0, 0, -6).Format("2006-01-02")
 	rows, err := s.db.QueryContext(ctx, `SELECT substr(timestamp,1,10), COUNT(*) FROM records
-		WHERE status='complete' AND substr(timestamp,1,10)>=? GROUP BY substr(timestamp,1,10) ORDER BY substr(timestamp,1,10)`, start)
+		WHERE status='complete' AND timestamp>=? GROUP BY substr(timestamp,1,10) ORDER BY substr(timestamp,1,10)`, start)
 	if err != nil {
 		return nil, err
 	}

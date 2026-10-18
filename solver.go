@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/onprs/OCS-Tiku/internal/catalog"
 )
@@ -89,6 +90,18 @@ func labelOptions(options string) string {
 		result = append(result, label+". "+strings.TrimSpace(optionLabel.ReplaceAllString(group, "")))
 	}
 	return strings.Join(result, "\n")
+}
+
+// truncateText 按字节上限截断文本，不切断多字节字符。
+func truncateText(text string, maxBytes int) string {
+	if len(text) <= maxBytes {
+		return text
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 func buildPrompt(title, options, kind string) string {
@@ -229,14 +242,14 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 			result.AgentError = "回答模型未标注工具调用能力，已按普通方式作答"
 		} else {
 			agentCtx := s.modelContext(ctx, "agent", answerService, cfg.Answer.Answer)
-			content, err = s.runAgent(agentCtx, cfg, answerService, []chatMessage{{Role: "user", Content: userContent}})
+			content, reasoning, err = s.runAgent(agentCtx, cfg, answerService, []chatMessage{{Role: "user", Content: userContent}})
 			if err != nil {
-				result.AgentError = "Agent 作答失败，已回退：" + err.Error()
-				content = ""
+				result.AgentError = "Agent 作答失败，已回退：" + agentErrorText(err)
+				content, reasoning = "", ""
 			}
 		}
 	}
-	if content == "" {
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(reasoning) == "" {
 		answerCtx := s.modelContext(ctx, "answer", answerService, cfg.Answer.Answer)
 		content, reasoning, err = s.models.chat(answerCtx, answerService, cfg.Answer.Answer, prompt, 0.1, 0)
 		result.RawContent, result.Reasoning = content, reasoning
@@ -245,7 +258,7 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 			return result, err
 		}
 	} else {
-		result.RawContent = content
+		result.RawContent, result.Reasoning = content, reasoning
 	}
 	result.Answer = extractAnswer(content, reasoning, kind)
 	return result, nil

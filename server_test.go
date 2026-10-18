@@ -397,6 +397,10 @@ func TestOldDatabaseMigration(t *testing.T) {
 	if err != nil || r.Answer != "A" || r.Status != "complete" || r.AnswerModel != "旧回答模型" || r.CaptionModel != "旧转述模型" {
 		t.Fatalf("旧记录迁移失败: %+v %v", r, err)
 	}
+	stats, err := store.stats(context.Background())
+	if err != nil || stats.Total != 1 || stats.SuccessRate != 100 {
+		t.Fatalf("旧库统计异常: %+v %v", stats, err)
+	}
 }
 
 func TestLargeImageIsReduced(t *testing.T) {

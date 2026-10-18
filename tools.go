@@ -49,9 +49,13 @@ func (t *historyTool) InvokableRun(ctx context.Context, arguments string, _ ...t
 	for _, record := range records {
 		title := cleanTitle(record.RawTitle)
 		if len(title) > 120 {
-			title = title[:120] + "…"
+			title = truncateText(title, 120) + "…"
 		}
-		fmt.Fprintf(&builder, "- 题目：%s\n  答案：%s\n", title, record.Answer)
+		answer := record.Answer
+		if len(answer) > 200 {
+			answer = truncateText(answer, 200) + "…"
+		}
+		fmt.Fprintf(&builder, "- 题目：%s\n  答案：%s\n", title, answer)
 	}
 	return builder.String(), nil
 }
