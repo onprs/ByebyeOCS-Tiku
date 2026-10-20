@@ -67,9 +67,19 @@ def check_release(binary, version):
                     assert fetch(asset), f"资源为空：{asset}"
                 for route in ("/records", "/settings"):
                     assert fetch(route) == index, f"页面路由异常：{route}"
+                config = json.loads(fetch("/api/config"))
+                assert config and config[0]["method"] == "post", "题库配置应使用 POST 搜索"
+                for method in ("HEAD", "GET"):
+                    request = urllib.request.Request(config[0]["url"] + "?t=1", method=method)
+                    with client.open(request, timeout=5) as response:
+                        assert response.status == 200, (method, response.status)
+                        body = response.read()
+                        if method == "HEAD":
+                            assert not body, "HEAD 探测不应返回正文"
+                        else:
+                            assert json.loads(body)["ok"], "题库连接探测失败"
                 dashboard = json.loads(fetch("/api/dashboard"))
-                assert dashboard["stats"]["total"] == 0, dashboard
-                assert json.loads(fetch("/api/config")), "题库配置为空"
+                assert dashboard["stats"]["total"] == 0, "连接探测不应产生答题记录"
                 assert (runtime / "config.yaml").is_file(), "未生成配置文件"
                 assert (runtime / "ocs-tiku.db").is_file(), "未生成数据库"
                 assert not (runtime / "frontend").exists(), "运行不应依赖外部网页目录"

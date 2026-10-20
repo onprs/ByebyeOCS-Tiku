@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -9,6 +10,62 @@ import (
 	"testing"
 	"time"
 )
+
+func TestOCSConnectionProbe(t *testing.T) {
+	s, web, _ := setupServer(t)
+	answer := s.config.snapshot().Answer
+	answer.Answer = ModelConfig{Vision: CapabilityAuto, ToolCall: CapabilityAuto}
+	if err := s.config.updateAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	s.address = strings.TrimPrefix(web.URL, "http://")
+	var config []struct {
+		URL    string `json:"url"`
+		Method string `json:"method"`
+	}
+	requestJSON(t, web, http.MethodGet, "/api/config", nil, http.StatusOK, &config)
+	if len(config) != 1 || config[0].Method != "post" {
+		t.Fatalf("题库配置应使用 POST 搜索: %+v", config)
+	}
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		t.Run(method, func(t *testing.T) {
+			// OCS 在题库地址上追加时间戳，并优先使用 HEAD 探测连接。
+			req, err := http.NewRequest(method, config[0].URL+"?t=1", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := web.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				t.Fatalf("连接探测失败: 状态=%d，错误=%v，内容=%s", resp.StatusCode, err, body)
+			}
+			if method == http.MethodHead && len(body) != 0 {
+				t.Fatal("HEAD 响应不应包含正文")
+			}
+			if method == http.MethodGet {
+				var status struct {
+					OK bool `json:"ok"`
+				}
+				if err := json.Unmarshal(body, &status); err != nil || !status.OK {
+					t.Fatalf("探测状态异常: %s，错误=%v", body, err)
+				}
+			}
+		})
+	}
+	// 连接探测不需要模型配置；POST 仍执行答题校验。
+	requestJSON(t, web, http.MethodPost, "/api/search", map[string]string{"title": "连接探测后的题目"}, http.StatusBadRequest, nil)
+	var records struct {
+		Total int `json:"total"`
+	}
+	requestJSON(t, web, http.MethodGet, "/api/records", nil, http.StatusOK, &records)
+	if records.Total != 0 {
+		t.Fatalf("连接探测不应产生答题记录: %d", records.Total)
+	}
+}
 
 func TestCreateServiceRejectsExistingID(t *testing.T) {
 	s, web, _ := setupServer(t)

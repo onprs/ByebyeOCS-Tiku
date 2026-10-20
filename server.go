@@ -62,6 +62,11 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/search", s.search)
+	// OCS 使用 HEAD 探测题库地址；GET 路由也会响应 HEAD。
+	mux.HandleFunc("GET /api/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		jsonResponse(w, http.StatusOK, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("GET /api/config", s.ocsConfig)
 	mux.HandleFunc("PUT /api/settings/answer", s.updateAnswer)
