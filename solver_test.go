@@ -151,7 +151,7 @@ func TestImageProcessingFailures(t *testing.T) {
 				return "  ", nil
 			}}
 			direct := failure == "download" || failure == "partial"
-			_, _, infos, _, err := processor.process(t.Context(), "https://images.example.com/a.png", "https://images.example.com/b.png", caption, direct)
+			_, _, infos, _, err := processor.process(t.Context(), "https://images.example.com/a.png", "https://images.example.com/b.png", caption, direct, nil)
 			if err == nil || len(infos) != 2 || infos[1].Status != "failed" {
 				t.Fatalf("图片失败未传播: %+v %v", infos, err)
 			}

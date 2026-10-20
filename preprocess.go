@@ -24,7 +24,7 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-var imageURLPattern = regexp.MustCompile(`(?i)https?://[^\s]+`)
+var imageReferencePattern = regexp.MustCompile(`(?i)https?://[^\s]+|\[图片[1-9][0-9]*\]`)
 
 var referers = map[string]string{
 	"chaoxing.com": "https://mooc1.chaoxing.com/", "xueyinonline.com": "https://mooc1.chaoxing.com/",
@@ -212,7 +212,12 @@ func (p *ImageProcessor) save(raw string, data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("%x", md5.Sum([]byte(raw)))[:12] + ext
+	digest := md5.Sum([]byte(raw))
+	if strings.HasPrefix(raw, "[图片") {
+		// 同一编号在不同题目中对应不同图片，上传图片按内容缓存。
+		digest = md5.Sum(data)
+	}
+	name := fmt.Sprintf("%x", digest)[:12] + ext
 	path := filepath.Join(p.dir, name)
 	if _, err = os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		err = os.WriteFile(path, data, 0600)
@@ -223,11 +228,13 @@ func (p *ImageProcessor) save(raw string, data []byte) (string, error) {
 	return "/images/" + name, nil
 }
 
-func extractImageURLs(text string) []string {
-	matches := imageURLPattern.FindAllString(text, -1)
+func extractImageReferences(text string) []string {
+	matches := imageReferencePattern.FindAllString(text, -1)
 	result := make([]string, 0, len(matches))
 	for _, raw := range matches {
-		raw = strings.TrimRight(raw, ".,;:!?)]}\"'")
+		if !strings.HasPrefix(raw, "[图片") {
+			raw = strings.TrimRight(raw, ".,;:!?)]}\"'")
+		}
 		if raw != "" {
 			result = append(result, raw)
 		}
@@ -241,12 +248,12 @@ type captionTask struct {
 }
 
 // process 处理题目中的图片。直传模式下保留原图数据交给回答模型；
-// 转述模式下用转述模型生成文字描述并替换图片地址。
-func (p *ImageProcessor) process(ctx context.Context, title, options string, caption *captionTask, direct bool) (string, string, []ImageInfo, map[string][]byte, error) {
-	urls := append(extractImageURLs(title), extractImageURLs(options)...)
+// 转述模式下用转述模型生成文字描述并替换图片引用。
+func (p *ImageProcessor) process(ctx context.Context, title, options string, caption *captionTask, direct bool, inlineImages map[string][]byte) (string, string, []ImageInfo, map[string][]byte, error) {
+	references := append(extractImageReferences(title), extractImageReferences(options)...)
 	infos := []ImageInfo{}
 	images := map[string][]byte{}
-	if len(urls) == 0 {
+	if len(references) == 0 {
 		return title, options, infos, images, nil
 	}
 	if !direct && caption == nil {
@@ -254,20 +261,32 @@ func (p *ImageProcessor) process(ctx context.Context, title, options string, cap
 	}
 	seen := map[string]bool{}
 	var processErr error
-	for _, raw := range urls {
+	for _, raw := range references {
 		if seen[raw] {
 			continue
 		}
 		seen[raw] = true
 		info := ImageInfo{URL: raw, Status: "failed"}
-		data, err := p.fetch(ctx, raw)
+		data, uploaded := inlineImages[raw]
+		var err error
+		if !uploaded {
+			if strings.HasPrefix(raw, "[图片") {
+				err = errors.New("缺少上传的图片数据")
+			} else {
+				data, err = p.fetch(ctx, raw)
+			}
+		}
 		if err == nil {
 			info.Src, err = p.save(raw, data)
 		}
 		if err == nil {
 			images[raw] = data
 			if direct {
-				info.Description = "已下载"
+				if uploaded {
+					info.Description = "已接收"
+				} else {
+					info.Description = "已下载"
+				}
 			} else {
 				info.Description, err = caption.run(ctx, data)
 				info.Description = strings.TrimSpace(info.Description)

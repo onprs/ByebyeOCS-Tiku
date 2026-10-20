@@ -152,17 +152,24 @@ func extractAnswer(content, reasoning, kind string) string {
 // 没有可用图片时返回纯文本，与文本请求保持一致的消息格式。
 func directContent(title, options, kind string, images map[string][]byte) any {
 	parts := []contentPart{{Type: "text", Text: "题型：" + questionLabel(kind) + "\n题目：" + replaceURLs(cleanTitle(title))}}
-	for _, raw := range extractImageURLs(title) {
+	for _, raw := range extractImageReferences(title) {
 		if data := images[raw]; data != nil {
+			if strings.HasPrefix(raw, "[图片") {
+				parts = append(parts, textPart(raw))
+			}
 			parts = append(parts, imagePart(data))
 		}
 	}
 	if kind != "completion" && strings.TrimSpace(options) != "" {
 		parts = append(parts, textPart("选项：\n"+labelOptions(replaceURLs(options))))
 		for optionIndex, group := range splitOptions(options) {
-			for _, raw := range extractImageURLs(group) {
+			for _, raw := range extractImageReferences(group) {
 				if data := images[raw]; data != nil {
-					parts = append(parts, textPart(fmt.Sprintf("[选项 %s 的图片]", optionName(optionIndex))), imagePart(data))
+					label := fmt.Sprintf("[选项 %s 的图片]", optionName(optionIndex))
+					if strings.HasPrefix(raw, "[图片") {
+						label += " " + raw
+					}
+					parts = append(parts, textPart(label), imagePart(data))
 				}
 			}
 		}
@@ -181,8 +188,10 @@ func directContent(title, options, kind string, images map[string][]byte) any {
 }
 
 func replaceURLs(text string) string {
-	for _, raw := range extractImageURLs(text) {
-		text = strings.ReplaceAll(text, raw, "[图]")
+	for _, raw := range extractImageReferences(text) {
+		if !strings.HasPrefix(raw, "[图片") {
+			text = strings.ReplaceAll(text, raw, "[图]")
+		}
 	}
 	return text
 }
@@ -190,7 +199,7 @@ func replaceURLs(text string) string {
 // solve 完成一次答题。图片路径由回答模型的视觉能力决定：
 // 具备视觉能力时图片直接交给回答模型，否则交给图片转述模型转为文字。
 // 开启 Agent 模式且模型支持工具调用时，由 agent 分步推理，失败时回退到普通作答。
-func (s *Solver) solve(ctx context.Context, title, options, kind string) (result Record, solveErr error) {
+func (s *Solver) solve(ctx context.Context, title, options, kind string, inlineImages map[string][]byte) (result Record, solveErr error) {
 	cfg := s.config.snapshot()
 	start := time.Now()
 	answerService := cfg.Services[cfg.Answer.Answer.Service]
@@ -214,7 +223,7 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string) (result
 			return s.models.describe(describeCtx, captionService, captionModel, cfg.Answer.CaptionPrompt, data)
 		}}
 	}
-	processedTitle, processedOptions, infos, images, err := s.images.process(ctx, title, options, caption, direct)
+	processedTitle, processedOptions, infos, images, err := s.images.process(ctx, title, options, caption, direct, inlineImages)
 	result.ProcessedTitle, result.ProcessedOptions, result.Images = processedTitle, processedOptions, infos
 	if err != nil {
 		result.Answer = "ERROR: " + err.Error()

@@ -69,6 +69,10 @@ def check_release(binary, version):
                     assert fetch(route) == index, f"页面路由异常：{route}"
                 config = json.loads(fetch("/api/config"))
                 assert config and config[0]["method"] == "post", "题库配置应使用 POST 搜索"
+                fields = config[0]["data"]
+                assert "images" in fields["images"]["handler"], "题库配置缺少图片数组解析器"
+                for field in ("suggestion_title", "suggestion_options"):
+                    assert fields[field] == "${" + field + "}", f"题库配置缺少图片优化字段：{field}"
                 for method in ("HEAD", "GET"):
                     request = urllib.request.Request(config[0]["url"] + "?t=1", method=method)
                     with client.open(request, timeout=5) as response:

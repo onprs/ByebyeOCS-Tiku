@@ -41,11 +41,15 @@ func jsonError(w http.ResponseWriter, status int, err error) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
+	return decodeJSONLimit(w, r, out, 1<<20)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, out any, maxBytes int64) bool {
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		jsonError(w, http.StatusUnsupportedMediaType, errors.New("需要 application/json"))
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(out); err != nil {
 		jsonError(w, http.StatusBadRequest, fmt.Errorf("请求 JSON 无效: %w", err))
@@ -91,12 +95,8 @@ func (s *Server) handler() http.Handler {
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Title   string `json:"title"`
-		Options string `json:"options"`
-		Type    string `json:"type"`
-	}
-	if !decodeJSON(w, r, &request) {
+	var request searchRequest
+	if !decodeJSONLimit(w, r, &request, maxSearchRequestBytes) {
 		return
 	}
 	if request.Type == "" {
@@ -113,13 +113,18 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, errAnswerMissing)
 		return
 	}
+	title, options, inlineImages, err := request.prepare()
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err)
+		return
+	}
 	id, err := s.store.pending(r.Context(), request.Type)
 	if err != nil {
 		jsonError(w, 500, err)
 		return
 	}
-	result, solveErr := s.solver.solve(withRecordID(r.Context(), id), request.Title, request.Options, request.Type)
-	result.ID = id
+	result, solveErr := s.solver.solve(withRecordID(r.Context(), id), title, options, request.Type, inlineImages)
+	result.ID, result.RawTitle, result.RawOptions = id, request.Title, request.Options
 	// 客户端可能中途断开，用独立超时保存结果，避免记录停留在 pending。
 	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -443,7 +448,12 @@ func (s *Server) ocsConfig(w http.ResponseWriter, _ *http.Request) {
 		"name": "OCS超星LLM题库", "url": base + "/api/search", "homepage": base,
 		"method": "post", "contentType": "json", "type": "GM_xmlhttpRequest",
 		"headers": map[string]string{"Content-Type": "application/json"},
-		"data":    map[string]string{"title": "${title}", "options": "${options}", "type": "${type}"},
+		"data": map[string]any{
+			"title": "${title}", "options": "${options}", "type": "${type}",
+			"images":             map[string]string{"handler": "return (env)=>env.images||[]"},
+			"suggestion_title":   "${suggestion_title}",
+			"suggestion_options": "${suggestion_options}",
+		},
 		"handler": "return (res)=>[res.question, res.answer]",
 	}})
 }
