@@ -125,16 +125,31 @@ func responseOptions(service ServiceConfig) []einomodel.Option {
 		if message == nil {
 			return message, nil
 		}
-		var payload struct {
-			Usage json.RawMessage `json:"usage"`
-		}
-		present := json.Unmarshal(rawBody, &payload) == nil && len(payload.Usage) > 0 && string(payload.Usage) != "null"
+		present := usageFieldsPresent(rawBody)
 		if message.Extra == nil {
 			message.Extra = map[string]any{}
 		}
 		message.Extra[usagePresenceKey] = present
 		return message, nil
 	})}
+}
+
+// usageFieldsPresent 要求 prompt/completion/total 三个字段都存在且非 null。
+// eino 会把缺失字段补成 0；只看 usage 对象是否存在会把缺字段误判为完整。
+func usageFieldsPresent(rawBody []byte) bool {
+	var payload struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(rawBody, &payload); err != nil || payload.Usage == nil {
+		return false
+	}
+	for _, key := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+		value, ok := payload.Usage[key]
+		if !ok || len(value) == 0 || string(value) == "null" {
+			return false
+		}
+	}
+	return true
 }
 
 // ChatText 保留上游只返回正文与推理内容的调用方式。

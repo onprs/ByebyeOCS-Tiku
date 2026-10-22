@@ -248,29 +248,56 @@ func SplitDataURL(raw string) (string, string, error) {
 
 func splitDataURL(raw string) (string, string, error) { return SplitDataURL(raw) }
 
-// ModelError 把各家 SDK 的错误整理为统一文案，并保留稳定分类。
+// ErrResponseTooLarge 表示上游响应超过 platform 的有界读取上限。
+var ErrResponseTooLarge = errors.New("模型响应超过大小上限")
+
+// ModelError 把各家 SDK 的错误整理为统一分类和安全文案。
+// 原始错误只保留在 Err 中供内部排查，不进入 Error() 或用户响应。
 func ModelError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, ErrResponseTooLarge) {
+		return &Error{Code: "response_too_large", Message: safeModelMessage("response_too_large"), Err: err}
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &Error{Code: "upstream_timeout", Message: "模型调用超时，结果未知", Err: err}
+		return &Error{Code: "upstream_timeout", Message: safeModelMessage("upstream_timeout"), Err: err}
 	}
 	if errors.Is(err, context.Canceled) {
-		return &Error{Code: "request_cancelled", Message: "请求已取消，模型结果未知", Err: err}
+		return &Error{Code: "request_cancelled", Message: safeModelMessage("request_cancelled"), Err: err}
 	}
 	var apiErr *einoopenai.APIError
 	if errors.As(err, &apiErr) {
 		code := codeForStatus(apiErr.HTTPStatusCode)
-		if apiErr.Message != "" {
-			return &Error{Code: code, Message: fmt.Sprintf("模型请求失败 (%d): %s", apiErr.HTTPStatusCode, apiErr.Message), Err: err}
-		}
-		return &Error{Code: code, Message: fmt.Sprintf("模型请求失败 (%d)", apiErr.HTTPStatusCode), Err: err}
+		return &Error{Code: code, Message: safeModelMessage(code), Err: err}
 	}
 	if match := statusCodePattern.FindString(err.Error()); match != "" {
-		return &Error{Code: codeForStatusText(match), Message: fmt.Sprintf("模型请求失败 (%s): %s", match, err.Error()), Err: err}
+		code := codeForStatusText(match)
+		return &Error{Code: code, Message: safeModelMessage(code), Err: err}
 	}
-	return &Error{Code: "model_unavailable", Message: fmt.Sprintf("模型请求失败: %v", err), Err: err}
+	return &Error{Code: "model_unavailable", Message: safeModelMessage("model_unavailable"), Err: err}
+}
+
+// safeModelMessage 只返回固定文案，不回显上游响应、URL、密钥或题干。
+func safeModelMessage(code string) string {
+	switch code {
+	case "model_auth_failed":
+		return "模型服务认证失败"
+	case "upstream_rate_limited":
+		return "模型服务限流，请稍后人工重试"
+	case "upstream_timeout":
+		return "模型调用超时，结果未知"
+	case "request_cancelled":
+		return "请求已取消，模型结果未知"
+	case "response_too_large":
+		return "模型响应超过大小上限"
+	case "invalid_request":
+		return "模型请求参数无效"
+	case "model_unavailable":
+		return "模型服务不可用"
+	default:
+		return "模型调用失败"
+	}
 }
 
 func codeForStatus(status int) string {

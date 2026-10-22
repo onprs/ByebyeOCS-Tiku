@@ -108,6 +108,11 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
+	if mode == "leaky_error" {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"api_key=sk-live-secret-123456 question=敏感题干 https://internal.example/path"}}`))
+		return
+	}
 	content := "<answer>A</answer>"
 	if strings.Contains(body.Model, "caption") {
 		content = "图片中的文字"
@@ -123,6 +128,9 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if mode != "missing_usage" {
 		usage := map[string]any{"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
+		if mode == "missing_completion" {
+			delete(usage, "completion_tokens")
+		}
 		if mode == "bad_total" {
 			usage["total_tokens"] = 1
 		}
@@ -344,6 +352,23 @@ func TestExactCacheAndOptionOrder(t *testing.T) {
 	}
 }
 
+func TestUpstreamErrorDoesNotLeak(t *testing.T) {
+	f := newFixture(t, fixtureOptions{mode: "leaky_error", vision: true, caption: true})
+	recorder := answerV2(t, f, v2Request("错误安全题", "A. 甲", "cache_first", "req-leak-0001", "idem-leak-0001", nil), "idem-leak-0001")
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("上游 500 应映射为 503，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if decodeErrorCode(t, recorder) != "model_unavailable" {
+		t.Fatalf("错误码不稳定: %s", recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, secret := range []string{"sk-live-secret-123456", "敏感题干", "internal.example", "api_key"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("v2 错误响应泄露原始上游内容 %q: %s", secret, body)
+		}
+	}
+}
+
 func TestV2UsesSharedEngineOverTLS(t *testing.T) {
 	f := newFixture(t, fixtureOptions{vision: true, caption: true})
 	if f.llm.server.TLS == nil {
@@ -527,7 +552,7 @@ func TestModelDisabledNoFallback(t *testing.T) {
 }
 
 func TestUsageIncompleteIsNotCached(t *testing.T) {
-	for _, mode := range []string{"missing_usage", "bad_total"} {
+	for _, mode := range []string{"missing_usage", "missing_completion", "bad_total"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture(t, fixtureOptions{mode: mode, vision: true, caption: true})
 			first := decodeResponse(t, answerV2(t, f, v2Request("用量题", "A. 甲\nB. 乙", "cache_first", "req-usage-0001", "idem-usage-0001", nil), "idem-usage-0001"))

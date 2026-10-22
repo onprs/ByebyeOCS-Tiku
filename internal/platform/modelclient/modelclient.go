@@ -9,7 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -63,6 +63,9 @@ type Client struct {
 	engine *engine.Client
 }
 
+// maxUpstreamResponseBytes 限制模型响应体，避免忽略预算后无限读取 JSON。
+const maxUpstreamResponseBytes int64 = 8 << 20
+
 // NewWithOptions 创建带私网拦截和可选私有 CA 的模型客户端。
 func NewWithOptions(opts Options) (*Client, error) {
 	if opts.Timeout <= 0 {
@@ -94,13 +97,65 @@ func NewWithOptions(opts Options) (*Client, error) {
 		IdleConnTimeout:       60 * time.Second,
 	}
 	httpClient := &http.Client{
-		Transport: transport,
+		Transport: boundedTransport{base: transport, limit: maxUpstreamResponseBytes},
 		Timeout:   opts.Timeout,
 		// 重定向可能绕过目标校验；模型端点不需要重定向。
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("上游重定向已拒绝") },
 	}
 	return &Client{engine: engine.NewClientWithHTTP(httpClient)}, nil
 }
+
+// boundedTransport 在传输层限制响应体大小，覆盖所有协议客户端读取路径。
+type boundedTransport struct {
+	base  http.RoundTripper
+	limit int64
+}
+
+func (t boundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if err != nil {
+		return nil, err
+	}
+	if response.ContentLength > t.limit {
+		_ = response.Body.Close()
+		return nil, engine.ErrResponseTooLarge
+	}
+	response.Body = &boundedBody{body: response.Body, remaining: t.limit}
+	return response, nil
+}
+
+// boundedBody 允许读取到 limit 字节；再多读一个字节即返回固定错误。
+type boundedBody struct {
+	body      io.ReadCloser
+	remaining int64
+	exceeded  bool
+}
+
+func (b *boundedBody) Read(buffer []byte) (int, error) {
+	if b.exceeded {
+		return 0, engine.ErrResponseTooLarge
+	}
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	if b.remaining <= 0 {
+		var probe [1]byte
+		n, err := b.body.Read(probe[:])
+		if n > 0 {
+			b.exceeded = true
+			return 0, engine.ErrResponseTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(buffer)) > b.remaining {
+		buffer = buffer[:b.remaining]
+	}
+	n, err := b.body.Read(buffer)
+	b.remaining -= int64(n)
+	return n, err
+}
+
+func (b *boundedBody) Close() error { return b.body.Close() }
 
 func guardedDial(dialer *net.Dialer, allowLoopback bool) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -177,16 +232,36 @@ func mapError(err error) error {
 		return nil
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &Error{Code: "upstream_timeout", Message: "模型调用超时，结果未知"}
+		return &Error{Code: "upstream_timeout", Message: safeMessage("upstream_timeout")}
 	}
 	if errors.Is(err, context.Canceled) {
-		return &Error{Code: "request_cancelled", Message: "请求已取消，模型结果未知"}
+		return &Error{Code: "request_cancelled", Message: safeMessage("request_cancelled")}
 	}
 	var upstream *engine.Error
 	if errors.As(err, &upstream) {
-		return &Error{Code: upstream.Code, Message: upstream.Message}
+		return &Error{Code: upstream.Code, Message: safeMessage(upstream.Code)}
 	}
-	return &Error{Code: "model_unavailable", Message: fmt.Sprintf("模型服务不可用: %v", err)}
+	return &Error{Code: "model_unavailable", Message: safeMessage("model_unavailable")}
+}
+
+// safeMessage 只返回 platform 固定文案，不回显原始错误、URL、密钥或题干。
+func safeMessage(code string) string {
+	switch code {
+	case "model_auth_failed":
+		return "模型服务认证失败"
+	case "upstream_rate_limited":
+		return "模型服务限流，请稍后人工重试"
+	case "upstream_timeout":
+		return "模型调用超时，结果未知"
+	case "request_cancelled":
+		return "请求已取消，模型结果未知"
+	case "response_too_large":
+		return "模型响应超过大小上限"
+	case "invalid_request":
+		return "模型请求参数无效"
+	default:
+		return "模型服务不可用"
+	}
 }
 
 // Reachability 只检查网络/认证可达性，不产生回答 token。

@@ -69,7 +69,8 @@ func UsageHandler(observe CallObserver) callbacks.Handler {
 		result := CallRecord{Info: info, Status: "ok", Latency: now.Sub(start)}
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			// 只保存固定安全文案，原始上游错误可能包含 URL、密钥或题干。
+			result.Error = ModelError(err).Error()
 		}
 		if output != nil && output.TokenUsage != nil {
 			result.PromptTokens = output.TokenUsage.PromptTokens

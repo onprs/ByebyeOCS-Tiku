@@ -265,6 +265,8 @@ func errorFromCode(code string) error {
 		return newError(code, "请求已取消，模型结果未知", 499, false)
 	case "empty_answer":
 		return newError(code, "模型未返回可提交的答案", 502, true)
+	case "response_too_large":
+		return newError(code, "模型响应超过大小上限", 502, false)
 	case "usage_incomplete":
 		return newError(code, "模型用量不完整，结果待复核", 502, false)
 	default:
