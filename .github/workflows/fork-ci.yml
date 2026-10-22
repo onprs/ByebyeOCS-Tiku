@@ -63,6 +63,7 @@ jobs:
           go-version: '1.26.x'
       - name: 准备隔离测试连接文件
         run: |
+          umask 077
           printf 'postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' > "$RUNNER_TEMP/ocs-tiku-test.dsn"
       - name: 运行全部测试
         env:

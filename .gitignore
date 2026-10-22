@@ -35,9 +35,15 @@ logs/
 *.crt
 *.cer
 
-# fork 维护文件；AGENTS.md 不随公开仓库发布
+# fork 维护文件与生成产物
 AGENTS.md
 .local/
+/bin/
+/ocs-tiku-fork
+/ocs-tiku-fork.exe
+secrets/
+*.token
+*.secret
 *.dsn
 ocs-tiku-fork.json
 

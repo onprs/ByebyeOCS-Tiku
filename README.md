@@ -1,87 +1,66 @@
-# OCS-Tiku fork
+# ByebyeOCS-Tiku
 
-本仓库是 [OCS-Tiku](https://github.com/onprs/OCS-Tiku) 的独立 fork，供 ByebyeOCS 正式题库服务使用，同时保留上游本地题库服务。
-
-上游基线为 `aedb64fb0b55b633362558c627887d0f1f4de565`，完整上游提交历史保留在本仓库中。维护和同步方式见 [UPSTREAM.md](UPSTREAM.md)。
+为 [ByebyeOCS](https://github.com/onprs/ByebyeOCS) 提供模型作答、精确答案缓存和 token 用量查询，兼容 OCS 客户端的 `/api/search` 接口。
 
 ## 功能
 
-- 保留上游 `POST /api/search` 兼容接口，旧 OCS 客户端可以继续使用。
-- 新增 `POST /api/v2/answers`：请求级公开模型、`cache_first`、`always_llm`、精确缓存、缓存失效、幂等和调用分解。
-- 模型调用经过上游共享核心，支持 OpenAI 兼容、Anthropic、Gemini 和 Ollama 协议。
-- 正式 platform 服务使用独立 PostgreSQL 数据库与 `tiku` schema；不打开 SQLite，不做双数据库兼容。
-- 服务端回传模型调用与 token 事实。缓存命中 token 为 0；用量缺失或总量矛盾标记为 `usage_incomplete`，不自动写入缓存。
-- 支持 `single`、`multiple`、`judgement`、`completion` 和 `shortanswer` 题型；简答题保留完整答案文本。
-- 模型能力画像、启停、可达性/功能性测试、用量汇总和缓存失效由内部管理接口提供。
+- 支持单选、多选、判断、填空和简答题，以及图片题。
+- 按请求选择已配置模型，支持 OpenAI 兼容、Anthropic、Gemini 和 Ollama 协议。
+- `cache_first` 优先查精确缓存，未命中再调用模型；`always_llm` 每次调用模型，成功答案可供后续缓存查询使用。
+- 返回输入、输出及总 token、缓存命中和调用明细；缓存命中 token 为零，用量不完整时明确标记。
+- 支持模型启停、连通性检查、功能测试、用量汇总和错误缓存失效。
+- 相同幂等请求返回原结果，价格与钱包结算由 ByebyeOCS 管理。
 
-## 安装与启动
+## 安装与配置
 
-正式 platform 服务需要 Go 1.26 或更高版本、PostgreSQL 16 和独立的数据库角色。
+从源码构建需要 Git、Go 1.26 或更高版本，以及 PostgreSQL 16 或更高版本。
 
 ```sh
-go build ./cmd/ocs-tiku-fork
+git clone https://github.com/onprs/ByebyeOCS-Tiku.git
+cd ByebyeOCS-Tiku
+go build -o ocs-tiku-fork ./cmd/ocs-tiku-fork
 cp ocs-tiku-fork.example.json ocs-tiku-fork.json
+```
+
+为本服务建立独立的 PostgreSQL 数据库与角色。编辑 `ocs-tiku-fork.json`，填写数据库连接文件、服务令牌文件及模型配置；私密文件权限设为 `0600`，所在目录设为 `0700`。模型密钥仅保存在本服务，ByebyeOCS 使用模型条目 ID 引用它们。
+
+模型配置示例：
+
+```json
+{
+  "id": "default-text",
+  "display_name": "默认文字模型",
+  "protocol": "openai-chat",
+  "base_url": "https://models.example.com/v1",
+  "model": "<供应商模型名称>",
+  "api_key_file": "secrets/model.key",
+  "max_output_tokens": 2048
+}
+```
+
+将模型加入配置的 `models` 数组，按需设置 `default_model_id`、图片模型及缓存期限，然后检查配置、显式迁移并启动：
+
+```sh
 ./ocs-tiku-fork config check -config ocs-tiku-fork.json
 ./ocs-tiku-fork migrate -config ocs-tiku-fork.json
 ./ocs-tiku-fork serve -config ocs-tiku-fork.json
 ```
 
-`migrate` 必须显式执行，`serve` 不会自动迁移，也不会创建默认模型或密钥。
+默认监听 `127.0.0.1:8093`。服务启动不会自动迁移或创建默认模型。访问接口需要服务令牌；ByebyeOCS 中的题库地址和令牌应与此处一致。
 
-配置只保存密钥文件路径，不保存密钥内容。数据库连接串、服务令牌和每个模型的 API Key 分别放在权限受控的文件中。`upstream_ca_file` 可选，用于私有 CA；`allow_loopback_upstreams` 只用于本地受控测试。
+## 使用
 
-模型条目示例：
-
-```json
-{
-  "id": "standard",
-  "display_name": "标准模型",
-  "protocol": "openai-chat",
-  "vendor": "",
-  "base_url": "https://models.example.com/v1",
-  "model": "example-model",
-  "api_key_file": "secrets/standard.key",
-  "vision": true,
-  "tool_call": false,
-  "reasoning": false,
-  "context": 128000,
-  "disabled": false,
-  "max_output_tokens": 2048
-}
-```
-
-`id` 是主平台保存的公开引用；`base_url`、真实模型名和密钥只存在于 fork 配置。`protocol` 省略时使用 `openai-chat`。
-
-### v1 本地题库页面
-
-上游本地服务仍可单独构建和运行。网页构建需要 Node.js 22 与 npm：
-
-```sh
-npm --prefix frontend ci
-npm --prefix frontend run build
-go run .
-```
-
-默认构建读取 `frontend/dist`。需要生成包含网页资源的单文件可执行文件时使用 `ocs_frontend` 构建标签；发布脚本已包含该标签。正式 platform 二进制不需要 Node.js 或网页资源。
-
-## v2 请求
-
-```http
-POST /api/v2/answers
-Authorization: Bearer <服务令牌>
-Idempotency-Key: <请求幂等键>
-Content-Type: application/json
-```
+ByebyeOCS 管理员发布模型条目后，用户可在学习安排中选择模型和作答模式。直接集成使用 `POST /api/v2/answers`，携带 `Authorization: Bearer <服务令牌>` 与稳定的 `Idempotency-Key`。
 
 ```json
 {
-  "request_id": "qq_...",
-  "model_offering_id": "standard",
+  "request_id": "<唯一请求编号>",
+  "model_offering_id": "default-text",
   "mode": "cache_first",
   "cache_scope": "user",
-  "cache_scope_key": "<不可逆用户范围键>",
+  "cache_scope_key": "<用户范围键>",
   "question": {
-    "title": "简述光合作用的条件。",
+    "title": "<题目内容>",
     "options": "",
     "type": "shortanswer",
     "images": []
@@ -90,24 +69,6 @@ Content-Type: application/json
 }
 ```
 
-`mode` 为 `cache_first` 或 `always_llm`：
+缓存只匹配规范化后完全一致的题目、选项、图片与模型条件。返回 `usage_incomplete` 时，上游用量尚不完整，应保留查询结果并停止自动扣费。
 
-- `cache_first` 只读精确缓存；未命中时调用模型，完整成功后写入缓存。
-- `always_llm` 跳过缓存读取，每次调用模型；完整成功答案仍写入缓存，供以后 `cache_first` 使用。
-
-缓存只做规范化后的完全一致匹配，相似题和历史模糊检索不会作为缓存命中。缓存命中返回 `usage.total_tokens: 0` 和空的 `usage.calls`。
-
-## 测试
-
-```sh
-go test ./...
-BYEBYEOCS_TIKU_TEST_DATABASE_DSN_FILE=/path/to/test-admin.dsn go test ./...
-```
-
-PostgreSQL 集成测试会创建并清理独立临时数据库，要求测试角色具有 `CREATEDB`。未提供连接文件时，相关测试显式跳过。模型夹具使用本地 TLS 服务，不向真实模型发送请求。
-
-## 说明
-
-题库服务只回传 token 与调用事实，不保存钱包金额，不按自己的价格扣费。实际价格、结算和真实支付由主平台配置。
-
-上游仓库目前没有 LICENSE 文件；本 fork 不擅自添加许可证。公开分发或商业使用前需由项目所有者补充许可证并核对依赖许可。
+本服务基于 [OCS-Tiku](https://github.com/onprs/OCS-Tiku)。维护与上游同步见 [UPSTREAM.md](UPSTREAM.md)，许可证见 [LICENSE](LICENSE)。
