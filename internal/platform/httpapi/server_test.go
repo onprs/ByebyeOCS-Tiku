@@ -1,0 +1,690 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/onprs/OCS-Tiku/internal/engine"
+	"github.com/onprs/OCS-Tiku/internal/platform/answer"
+	"github.com/onprs/OCS-Tiku/internal/platform/config"
+	"github.com/onprs/OCS-Tiku/internal/platform/modelclient"
+	"github.com/onprs/OCS-Tiku/internal/platform/store"
+)
+
+const testToken = "fork-test-service-token-0123456789abcdef"
+
+type fakeLLM struct {
+	server          *httptest.Server
+	mu              sync.Mutex
+	mode            string
+	answerCalls     int
+	captionCalls    int
+	lastImages      int
+	lastAuth        string
+	lastShortAnswer bool
+}
+
+func (f *fakeLLM) setMode(mode string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mode = mode
+}
+
+func (f *fakeLLM) counts() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.answerCalls, f.captionCalls
+}
+
+func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/models") {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+		return
+	}
+	if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+		http.NotFound(w, r)
+		return
+	}
+	var body struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	mode := f.mode
+	images := 0
+	shortAnswer := false
+	for _, msg := range body.Messages {
+		images += bytes.Count(msg.Content, []byte(`"type":"image_url"`))
+		if bytes.Contains(msg.Content, []byte("简答题")) {
+			shortAnswer = true
+		}
+	}
+	if strings.Contains(body.Model, "caption") {
+		f.captionCalls++
+	} else {
+		f.answerCalls++
+		f.lastImages = images
+		f.lastAuth = r.Header.Get("Authorization")
+		f.lastShortAnswer = shortAnswer
+	}
+	f.mu.Unlock()
+	if mode == "delay" {
+		select {
+		case <-time.After(250 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if mode == "block" {
+		<-r.Context().Done()
+		return
+	}
+	if mode == "rate_limited" {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	content := "<answer>A</answer>"
+	if strings.Contains(body.Model, "caption") {
+		content = "图片中的文字"
+	}
+	if shortAnswer {
+		content = "<answer>光合作用需要光能、水和叶绿体。\n温度也会影响。</answer>"
+	}
+	if mode == "empty" {
+		content = ""
+	}
+	response := map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"content": content}}},
+	}
+	if mode != "missing_usage" {
+		usage := map[string]any{"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
+		if mode == "bad_total" {
+			usage["total_tokens"] = 1
+		}
+		response["usage"] = usage
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+type fixtureOptions struct {
+	mode           string
+	vision         bool
+	caption        bool
+	shared         bool
+	timeoutSeconds int
+}
+
+type fixture struct {
+	handler http.Handler
+	cfg     *config.Config
+	store   *store.Store
+	llm     *fakeLLM
+	pool    *pgxpool.Pool
+}
+
+func newFixture(t *testing.T, opts fixtureOptions) *fixture {
+	t.Helper()
+	llm := &fakeLLM{mode: opts.mode}
+	llm.server = httptest.NewTLSServer(llm)
+	t.Cleanup(llm.server.Close)
+	caPath := filepath.Join(t.TempDir(), "upstream-ca.pem")
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: llm.server.Certificate().Raw})
+	if err := os.WriteFile(caPath, certificate, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Listen: "127.0.0.1:0", DatabaseDSNFile: "unused", ServiceTokenFile: "unused",
+		UpstreamCAFile: caPath,
+		DefaultModelID: "standard", AllowLoopbackUpstreams: true,
+		PromptVersion: "test-p1", NormalizationVersion: "test-n1",
+		Limits: config.Limits{
+			MaxRequestBytes: 8 << 20, MaxImages: 8, MaxImageBytes: 1 << 20, MaxImagePixels: 4_000_000,
+			MaxOutputTokens: 256, Concurrency: 2, TimeoutSeconds: 5, IdempotencyRetentionHours: 168,
+		},
+		Cache: config.Cache{TTLDays: 7, MaxTTLDays: 30, SharedEnabled: opts.shared},
+		Models: []config.Model{
+			{ID: "standard", DisplayName: "测试模型", Protocol: engine.ProtocolOpenAIChat, BaseURL: llm.server.URL + "/v1", Model: "fake-answer", APIKeyFile: "unused", Vision: opts.vision, ToolCall: true, Context: 128000},
+			{ID: "caption-model", DisplayName: "转述模型", Protocol: engine.ProtocolOpenAIChat, BaseURL: llm.server.URL + "/v1", Model: "fake-caption", APIKeyFile: "unused", Vision: true},
+		},
+	}
+	if opts.caption {
+		cfg.CaptionModelID = "caption-model"
+	}
+	if opts.timeoutSeconds > 0 {
+		cfg.Limits.TimeoutSeconds = opts.timeoutSeconds
+	}
+	pool := testPool(t)
+	st := store.New(pool)
+	client, err := modelclient.NewWithOptions(modelclient.Options{AllowLoopback: true, CAFile: caPath, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := answer.New(cfg, st, map[string]string{"standard": "test-api-key", "caption-model": "test-api-key"}, client)
+	return &fixture{handler: New(cfg, svc, st, testToken, nil), cfg: cfg, store: st, llm: llm, pool: pool}
+}
+
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	path := os.Getenv("BYEBYEOCS_TIKU_TEST_DATABASE_DSN_FILE")
+	if path == "" {
+		path = os.Getenv("BYEBYEOCS_TEST_DATABASE_DSN_FILE")
+	}
+	if path == "" {
+		t.Skip("未提供隔离 PostgreSQL 连接文件，跳过 fork 集成测试")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("无法读取测试数据库连接文件")
+	}
+	dsn := strings.TrimSpace(string(data))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	admin, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("无法连接隔离测试数据库")
+	}
+	name := "tiku_it_" + strings.ReplaceAll(store.NewUUID(), "-", "")[:16]
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+		admin.Close(ctx)
+		t.Fatalf("无法创建临时数据库，测试角色需要 CREATEDB")
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
+			t.Errorf("清理临时数据库失败")
+		}
+		admin.Close(cleanupCtx)
+	})
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("测试数据库连接串无效")
+	}
+	parsed.Path = "/" + name
+	parsed.RawPath = ""
+	pool, err := pgxpool.New(ctx, parsed.String())
+	if err != nil {
+		t.Fatalf("无法连接临时数据库")
+	}
+	t.Cleanup(pool.Close)
+	if _, err := store.New(pool).Migrate(ctx); err != nil {
+		t.Fatalf("临时数据库迁移失败: %v", err)
+	}
+	return pool
+}
+
+func v2Request(title, options, mode, requestID, idemKey string, images []string) answer.Request {
+	return answer.Request{
+		RequestID: requestID, ModelOfferingID: "standard", Mode: mode,
+		CacheScope: "user", CacheScopeKey: "user-scope-key-001",
+		Question: answer.QuestionInput{Title: title, Options: options, Type: "single", Images: images},
+		Budget:   answer.Budget{MaxOutputTokens: 128},
+	}
+}
+
+func postJSON(t *testing.T, handler http.Handler, path string, body any, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	return recorder
+}
+
+func authHeaders(key string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + testToken, "Idempotency-Key": key}
+}
+
+func answerV2(t *testing.T, f *fixture, body answer.Request, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	return postJSON(t, f.handler, "/api/v2/answers", body, authHeaders(key))
+}
+
+func decodeResponse(t *testing.T, recorder *httptest.ResponseRecorder) answer.Response {
+	t.Helper()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d：%s", recorder.Code, recorder.Body.String())
+	}
+	var response answer.Response
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("响应不是有效 JSON：%v", err)
+	}
+	return response
+}
+
+func decodeErrorCode(t *testing.T, recorder *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("错误响应无效：%v", err)
+	}
+	return body.Error.Code
+}
+
+func TestLegacySearchCompatibility(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	recorder := postJSON(t, f.handler, "/api/search", map[string]any{
+		"title": "1+1=?", "options": "A. 1\nB. 2", "type": "single",
+	}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("v1 返回 %d：%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["question"] != "1+1=?" || response["answer"] != "A" {
+		t.Fatalf("v1 响应字段不兼容：%#v", response)
+	}
+	probe := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/search", nil)
+	f.handler.ServeHTTP(probe, req)
+	if probe.Code != http.StatusOK || !strings.Contains(probe.Body.String(), `"ok":true`) {
+		t.Fatalf("v1 探测失败：%d %s", probe.Code, probe.Body.String())
+	}
+}
+
+func TestExactCacheAndOptionOrder(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	first := decodeResponse(t, answerV2(t, f, v2Request("题目一", "A. 甲\nB. 乙", "cache_first", "req-first-0001", "idem-first-0001", nil), "idem-first-0001"))
+	if first.Status != "answered" || first.Usage.TotalTokens == nil || *first.Usage.TotalTokens != 110 || len(first.Usage.Calls) != 1 {
+		t.Fatalf("首次作答事实不符：%#v", first)
+	}
+	second := decodeResponse(t, answerV2(t, f, v2Request("题目一", "A. 甲\nB. 乙", "cache_first", "req-second-0002", "idem-second-0002", nil), "idem-second-0002"))
+	if second.Status != "cache_hit" || !second.Cache.Hit || second.Cache.EntryID == nil || second.Cache.CreatedAt == nil {
+		t.Fatalf("精确缓存未命中：%#v", second)
+	}
+	if second.Usage.TotalTokens == nil || *second.Usage.TotalTokens != 0 || len(second.Usage.Calls) != 0 {
+		t.Fatalf("缓存命中 token/calls 必须为 0/空：%#v", second.Usage)
+	}
+	third := decodeResponse(t, answerV2(t, f, v2Request("题目一", "B. 乙\nA. 甲", "cache_first", "req-third-0003", "idem-third-0003", nil), "idem-third-0003"))
+	if third.Status != "answered" || third.Cache.Hit {
+		t.Fatalf("选项顺序不同不应命中缓存：%#v", third)
+	}
+	answers, _ := f.llm.counts()
+	if answers != 2 {
+		t.Fatalf("期望 2 次回答调用，实际 %d", answers)
+	}
+}
+
+func TestV2UsesSharedEngineOverTLS(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	if f.llm.server.TLS == nil {
+		t.Fatal("provider 夹具必须走本地 TLS")
+	}
+	response := decodeResponse(t, answerV2(t, f, v2Request("共享核心题", "A. 甲\nB. 乙", "cache_first", "req-engine-0001", "idem-engine-0001", nil), "idem-engine-0001"))
+	if response.Status != "answered" || response.Usage.TotalTokens == nil || *response.Usage.TotalTokens != 110 {
+		t.Fatalf("v2 未取得共享核心返回的真实 token：%#v", response)
+	}
+	f.llm.mu.Lock()
+	auth := f.llm.lastAuth
+	f.llm.mu.Unlock()
+	if auth != "Bearer test-api-key" {
+		t.Fatalf("v2 未通过共享核心发送认证头：%q", auth)
+	}
+}
+
+func TestShortAnswerKeepsFullContentAndCaches(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	want := "光合作用需要光能、水和叶绿体。\n温度也会影响。"
+	request := func(requestID, idemKey string) answer.Request {
+		body := v2Request("简述光合作用的条件。", "", "cache_first", requestID, idemKey, nil)
+		body.Question.Type = "shortanswer"
+		return body
+	}
+	first := decodeResponse(t, answerV2(t, f, request("req-short-0001", "idem-short-0001"), "idem-short-0001"))
+	if first.Status != "answered" || first.Answer != want {
+		t.Fatalf("简答题应保留完整内容：%#v", first)
+	}
+	f.llm.mu.Lock()
+	sawShortAnswer := f.llm.lastShortAnswer
+	f.llm.mu.Unlock()
+	if !sawShortAnswer {
+		t.Fatal("模型提示词缺少简答题题型标签")
+	}
+	second := decodeResponse(t, answerV2(t, f, request("req-short-0002", "idem-short-0002"), "idem-short-0002"))
+	if second.Status != "cache_hit" || second.Answer != want || second.Usage.TotalTokens == nil || *second.Usage.TotalTokens != 0 {
+		t.Fatalf("简答题精确缓存异常：%#v", second)
+	}
+	answers, _ := f.llm.counts()
+	if answers != 1 {
+		t.Fatalf("简答题缓存命中不应再次调用模型，实际 %d", answers)
+	}
+}
+
+func TestSimilarTitleDoesNotUseCache(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	_ = decodeResponse(t, answerV2(t, f, v2Request("下列说法正确的是", "A. 甲\nB. 乙", "cache_first", "req-near-0001", "idem-near-0001", nil), "idem-near-0001"))
+	near := decodeResponse(t, answerV2(t, f, v2Request("下列说法正确的是？", "A. 甲\nB. 乙", "cache_first", "req-near-0002", "idem-near-0002", nil), "idem-near-0002"))
+	if near.Status != "answered" || near.Cache.Hit {
+		t.Fatalf("相似但不完全相同的题目不得伪装成缓存命中：%#v", near)
+	}
+	answers, _ := f.llm.counts()
+	if answers != 2 {
+		t.Fatalf("相似题应再次调用模型，实际 %d", answers)
+	}
+}
+
+func TestCaptionCallDecomposition(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: false, caption: true})
+	imageURL := testPNG(t)
+	response := decodeResponse(t, answerV2(t, f, v2Request("图片题[图片1]", "A. 甲\nB. 乙", "cache_first", "req-caption-0001", "idem-caption-0001", []string{imageURL}), "idem-caption-0001"))
+	if response.Status != "answered" || len(response.Usage.Calls) != 2 {
+		t.Fatalf("图片转述与回答应分别记录调用：%#v", response)
+	}
+	if response.Usage.Calls[0].Slot != "caption" || response.Usage.Calls[1].Slot != "answer" {
+		t.Fatalf("调用顺序或槽位不符：%#v", response.Usage.Calls)
+	}
+	if response.Usage.TotalTokens == nil || *response.Usage.TotalTokens != 220 {
+		t.Fatalf("转述与回答 token 应合计：%#v", response.Usage)
+	}
+	answers, captions := f.llm.counts()
+	if answers != 1 || captions != 1 {
+		t.Fatalf("转述/回答调用次数不符：%d/%d", captions, answers)
+	}
+}
+
+func TestAlwaysLLMSkipsCacheAndWritesCache(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	_ = decodeResponse(t, answerV2(t, f, v2Request("缓存题", "A. 甲\nB. 乙", "cache_first", "req-cache-0001", "idem-cache-0001", nil), "idem-cache-0001"))
+	always := decodeResponse(t, answerV2(t, f, v2Request("缓存题", "A. 甲\nB. 乙", "always_llm", "req-always-0002", "idem-always-0002", nil), "idem-always-0002"))
+	if always.Status != "answered" || always.Cache.Hit || always.Usage.TotalTokens == nil || *always.Usage.TotalTokens != 110 {
+		t.Fatalf("always_llm 不应读取缓存：%#v", always)
+	}
+	hit := decodeResponse(t, answerV2(t, f, v2Request("缓存题", "A. 甲\nB. 乙", "cache_first", "req-after-0003", "idem-after-0003", nil), "idem-after-0003"))
+	if hit.Status != "cache_hit" {
+		t.Fatalf("always_llm 成功结果应可供后续缓存命中：%#v", hit)
+	}
+	answers, _ := f.llm.counts()
+	if answers != 2 {
+		t.Fatalf("期望 2 次模型调用，实际 %d", answers)
+	}
+}
+
+func TestAlwaysLLMTwiceThenCacheHit(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	request := func(requestID, idemKey string) answer.Request {
+		return v2Request("连续模型题", "A. 甲\nB. 乙", "always_llm", requestID, idemKey, nil)
+	}
+	first := decodeResponse(t, answerV2(t, f, request("req-always-twice-0001", "idem-always-twice-0001"), "idem-always-twice-0001"))
+	second := decodeResponse(t, answerV2(t, f, request("req-always-twice-0002", "idem-always-twice-0002"), "idem-always-twice-0002"))
+	for index, response := range []answer.Response{first, second} {
+		if response.Status != "answered" || response.Cache.Hit || response.Usage.TotalTokens == nil || *response.Usage.TotalTokens != 110 {
+			t.Fatalf("第 %d 次 always_llm 应真实调用模型：%#v", index+1, response)
+		}
+	}
+	answers, _ := f.llm.counts()
+	if answers != 2 {
+		t.Fatalf("连续两次 always_llm 应产生两次模型调用，实际 %d", answers)
+	}
+	hit := decodeResponse(t, answerV2(t, f, v2Request("连续模型题", "A. 甲\nB. 乙", "cache_first", "req-always-twice-0003", "idem-always-twice-0003", nil), "idem-always-twice-0003"))
+	if hit.Status != "cache_hit" || !hit.Cache.Hit || hit.Usage.TotalTokens == nil || *hit.Usage.TotalTokens != 0 || len(hit.Usage.Calls) != 0 {
+		t.Fatalf("后续 cache_first 应命中且 token 为 0：%#v", hit)
+	}
+	answers, _ = f.llm.counts()
+	if answers != 2 {
+		t.Fatalf("缓存命中不应再次调用模型，实际 %d", answers)
+	}
+}
+
+func TestIdempotencySameConflictAndConcurrent(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	request := v2Request("幂等题", "A. 甲\nB. 乙", "cache_first", "req-idem-0001", "idem-key-0001", nil)
+	first := decodeResponse(t, answerV2(t, f, request, "idem-key-0001"))
+	second := decodeResponse(t, answerV2(t, f, request, "idem-key-0001"))
+	if first.Answer != second.Answer || second.RequestID != request.RequestID {
+		t.Fatalf("相同幂等请求应返回同一结果")
+	}
+	answers, _ := f.llm.counts()
+	if answers != 1 {
+		t.Fatalf("幂等重放不应重复调用模型，实际 %d", answers)
+	}
+	conflict := answerV2(t, f, v2Request("不同题目", "A. 甲\nB. 乙", "cache_first", "req-idem-0001", "idem-key-0001", nil), "idem-key-0001")
+	if conflict.Code != http.StatusConflict || decodeErrorCode(t, conflict) != "idempotency_conflict" {
+		t.Fatalf("不同摘要应返回 409：%d %s", conflict.Code, conflict.Body.String())
+	}
+	f.llm.setMode("delay")
+	concurrent := v2Request("并发题", "A. 甲\nB. 乙", "cache_first", "req-concurrent-0001", "idem-concurrent-0001", nil)
+	var wait sync.WaitGroup
+	codes := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			recorder := answerV2(t, f, concurrent, "idem-concurrent-0001")
+			codes[index] = recorder.Code
+		}(i)
+	}
+	wait.Wait()
+	if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
+		t.Fatalf("并发同请求应都返回 200，实际 %v", codes)
+	}
+	f.llm.mu.Lock()
+	after := f.llm.answerCalls
+	f.llm.mu.Unlock()
+	if after != 2 {
+		t.Fatalf("并发同请求只应新增一次模型调用，累计 %d", after)
+	}
+}
+
+func TestModelDisabledNoFallback(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	if err := f.store.SetModelDisabled(context.Background(), "standard", true); err != nil {
+		t.Fatal(err)
+	}
+	recorder := answerV2(t, f, v2Request("下架题", "A. 甲\nB. 乙", "cache_first", "req-disabled-0001", "idem-disabled-0001", nil), "idem-disabled-0001")
+	if recorder.Code != http.StatusConflict || decodeErrorCode(t, recorder) != "model_disabled" {
+		t.Fatalf("模型下架应拒绝且不切换：%d %s", recorder.Code, recorder.Body.String())
+	}
+	answers, _ := f.llm.counts()
+	if answers != 0 {
+		t.Fatalf("下架模型不应产生调用，实际 %d", answers)
+	}
+	modelsReq := httptest.NewRequest(http.MethodGet, "/internal/v1/models", nil)
+	modelsReq.Header.Set("Authorization", "Bearer "+testToken)
+	models := httptest.NewRecorder()
+	f.handler.ServeHTTP(models, modelsReq)
+	if strings.Contains(models.Body.String(), "fake-answer") || strings.Contains(models.Body.String(), "test-api-key") {
+		t.Fatal("内部模型列表不得泄露上游模型名或密钥")
+	}
+}
+
+func TestUsageIncompleteIsNotCached(t *testing.T) {
+	for _, mode := range []string{"missing_usage", "bad_total"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t, fixtureOptions{mode: mode, vision: true, caption: true})
+			first := decodeResponse(t, answerV2(t, f, v2Request("用量题", "A. 甲\nB. 乙", "cache_first", "req-usage-0001", "idem-usage-0001", nil), "idem-usage-0001"))
+			if first.Status != "usage_incomplete" || first.Usage.Complete || first.Usage.TotalTokens != nil {
+				t.Fatalf("用量缺失必须标记不完整且不补 0：%#v", first)
+			}
+			if first.Answer != "A" || len(first.Usage.Calls) != 1 {
+				t.Fatalf("应保留答案与调用事实：%#v", first)
+			}
+			second := decodeResponse(t, answerV2(t, f, v2Request("用量题", "A. 甲\nB. 乙", "cache_first", "req-usage-0002", "idem-usage-0002", nil), "idem-usage-0002"))
+			if second.Cache.Hit {
+				t.Fatalf("用量不完整结果不得写入缓存")
+			}
+			answers, _ := f.llm.counts()
+			if answers != 2 {
+				t.Fatalf("未缓存应再次调用模型，实际 %d", answers)
+			}
+		})
+	}
+}
+
+func TestImagesBudgetAndVisionFallback(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	imageURL := testPNG(t)
+	imgReq := v2Request("看图[图片1]", "A. 甲\nB. 乙", "cache_first", "req-image-0001", "idem-image-0001", []string{imageURL})
+	img := decodeResponse(t, answerV2(t, f, imgReq, "idem-image-0001"))
+	if img.Status != "answered" {
+		t.Fatalf("视觉模型应直接作答：%#v", img)
+	}
+	f.llm.mu.Lock()
+	if f.llm.lastImages != 1 {
+		t.Fatalf("视觉模型应收到 1 张图片，实际 %d", f.llm.lastImages)
+	}
+	f.llm.mu.Unlock()
+
+	textOnly := newFixture(t, fixtureOptions{vision: false, caption: false})
+	unsupported := answerV2(t, textOnly, v2Request("看图[图片1]", "A. 甲", "cache_first", "req-image-0002", "idem-image-0002", []string{imageURL}), "idem-image-0002")
+	if unsupported.Code != http.StatusUnprocessableEntity || decodeErrorCode(t, unsupported) != "vision_unsupported" {
+		t.Fatalf("无视觉能力且无转述模型应拒绝：%d %s", unsupported.Code, unsupported.Body.String())
+	}
+	overBudget := v2Request("预算题", "A. 甲", "cache_first", "req-budget-0001", "idem-budget-0001", nil)
+	overBudget.Budget.MaxOutputTokens = 999
+	budgetResp := answerV2(t, f, overBudget, "idem-budget-0001")
+	if budgetResp.Code != http.StatusUnprocessableEntity || decodeErrorCode(t, budgetResp) != "budget_exceeded" {
+		t.Fatalf("超预算应拒绝：%d %s", budgetResp.Code, budgetResp.Body.String())
+	}
+	images := make([]string, 9)
+	title := strings.Builder{}
+	for i := range images {
+		images[i] = imageURL
+		fmt.Fprintf(&title, "[图片%d]", i+1)
+	}
+	tooMany := v2Request(title.String(), "A. 甲", "cache_first", "req-images-0001", "idem-images-0001", images)
+	manyResp := answerV2(t, f, tooMany, "idem-images-0001")
+	if manyResp.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("超过图片数量上限应拒绝：%d", manyResp.Code)
+	}
+	badImage := v2Request("坏图[图片1]", "A. 甲", "cache_first", "req-bad-0001", "idem-bad-0001", []string{"data:image/png;base64,not-base64"})
+	badResp := answerV2(t, f, badImage, "idem-bad-0001")
+	if badResp.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("非法 Base64 图片应拒绝：%d", badResp.Code)
+	}
+}
+
+func TestCacheInvalidationKeepsEvidence(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	_ = decodeResponse(t, answerV2(t, f, v2Request("失效题", "A. 甲\nB. 乙", "cache_first", "req-inv-0001", "idem-inv-0001", nil), "idem-inv-0001"))
+	hit := decodeResponse(t, answerV2(t, f, v2Request("失效题", "A. 甲\nB. 乙", "cache_first", "req-inv-0002", "idem-inv-0002", nil), "idem-inv-0002"))
+	if hit.Cache.EntryID == nil {
+		t.Fatal("缓存命中应返回条目 ID")
+	}
+	entryID := *hit.Cache.EntryID
+	recorder := postJSON(t, f.handler, "/internal/v1/cache/invalidations", map[string]any{
+		"entry_id": entryID, "reason": "用户报告答案错误", "actor": "admin:test",
+	}, map[string]string{"Authorization": "Bearer " + testToken})
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"invalidated":true`) {
+		t.Fatalf("缓存失效失败：%d %s", recorder.Code, recorder.Body.String())
+	}
+	after := decodeResponse(t, answerV2(t, f, v2Request("失效题", "A. 甲\nB. 乙", "cache_first", "req-inv-0003", "idem-inv-0003", nil), "idem-inv-0003"))
+	if after.Cache.Hit || after.Status != "answered" {
+		t.Fatalf("失效后不应命中缓存：%#v", after)
+	}
+	var reason string
+	var invalidatedAt *time.Time
+	err := f.pool.QueryRow(context.Background(), `SELECT invalidation_reason, invalidated_at FROM tiku.cache_entries WHERE id = $1`, entryID).Scan(&reason, &invalidatedAt)
+	if err != nil || reason == "" || invalidatedAt == nil {
+		t.Fatalf("失效应保留最小证据：%v", err)
+	}
+	answers, _ := f.llm.counts()
+	if answers != 2 {
+		t.Fatalf("失效后应重新调用模型，实际 %d", answers)
+	}
+}
+
+func TestModelTestsAndAuthorization(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	unauthorized := postJSON(t, f.handler, "/api/v2/answers", v2Request("未授权", "A. 甲", "cache_first", "req-auth-0001", "idem-auth-0001", nil), map[string]string{"Idempotency-Key": "idem-auth-0001"})
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("缺少服务令牌应 401，实际 %d", unauthorized.Code)
+	}
+	noConfirm := postJSON(t, f.handler, "/internal/v1/models/standard/tests", map[string]any{"kind": "functional"}, map[string]string{"Authorization": "Bearer " + testToken})
+	if noConfirm.Code != http.StatusPreconditionRequired || decodeErrorCode(t, noConfirm) != "cost_confirmation_required" {
+		t.Fatalf("功能性测试必须显式确认成本：%d %s", noConfirm.Code, noConfirm.Body.String())
+	}
+	functional := postJSON(t, f.handler, "/internal/v1/models/standard/tests", map[string]any{"kind": "functional", "confirm_cost": true}, map[string]string{"Authorization": "Bearer " + testToken})
+	if functional.Code != http.StatusOK || !strings.Contains(functional.Body.String(), `"functional":true`) {
+		t.Fatalf("功能性测试失败：%d %s", functional.Code, functional.Body.String())
+	}
+	reachability := postJSON(t, f.handler, "/internal/v1/models/standard/tests", map[string]any{"kind": "reachability"}, map[string]string{"Authorization": "Bearer " + testToken})
+	if reachability.Code != http.StatusOK || !strings.Contains(reachability.Body.String(), `"reachable":true`) {
+		t.Fatalf("可达性测试失败：%d %s", reachability.Code, reachability.Body.String())
+	}
+}
+
+func TestTimeoutLeavesUnknownFactWithoutReplay(t *testing.T) {
+	f := newFixture(t, fixtureOptions{mode: "block", vision: true, caption: true, timeoutSeconds: 1})
+	body := v2Request("超时题", "A. 甲", "cache_first", "req-timeout-0001", "idem-timeout-0001", nil)
+	first := answerV2(t, f, body, "idem-timeout-0001")
+	if first.Code != http.StatusGatewayTimeout || decodeErrorCode(t, first) != "upstream_timeout" {
+		t.Fatalf("超时应返回 upstream_timeout：%d %s", first.Code, first.Body.String())
+	}
+	second := answerV2(t, f, body, "idem-timeout-0001")
+	if second.Code != http.StatusConflict || decodeErrorCode(t, second) != "request_unknown" {
+		t.Fatalf("未知结果同键重试不得再次调用：%d %s", second.Code, second.Body.String())
+	}
+	answers, _ := f.llm.counts()
+	if answers != 1 {
+		t.Fatalf("超时同键重试不得重复调用模型，实际 %d", answers)
+	}
+	var state string
+	if err := f.pool.QueryRow(context.Background(), `SELECT state FROM tiku.requests WHERE idempotency_key = $1`, "idem-timeout-0001").Scan(&state); err != nil || state != "unknown" {
+		t.Fatalf("应保留 unknown 幂等事实：%s %v", state, err)
+	}
+}
+
+func TestSharedCacheRequiresExplicitEnable(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true, shared: false})
+	request := v2Request("共享题", "A. 甲", "cache_first", "req-shared-0001", "idem-shared-0001", nil)
+	request.CacheScope = "shared"
+	request.CacheScopeKey = ""
+	recorder := answerV2(t, f, request, "idem-shared-0001")
+	if recorder.Code != http.StatusConflict || decodeErrorCode(t, recorder) != "shared_cache_disabled" {
+		t.Fatalf("共享缓存未开启应拒绝：%d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func testPNG(t *testing.T) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 2; x++ {
+			img.Set(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	var buffer bytes.Buffer
+	if err := png.Encode(&buffer, img); err != nil {
+		t.Fatal(err)
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buffer.Bytes())
+}

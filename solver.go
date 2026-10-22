@@ -11,13 +11,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/onprs/OCS-Tiku/internal/catalog"
+	"github.com/onprs/OCS-Tiku/internal/engine"
 )
 
 var (
-	answerPattern = regexp.MustCompile(`(?is)<answer>\s*(.*?)\s*</answer>`)
-	tagPattern    = regexp.MustCompile(`<[^>]+>`)
-	spacePattern  = regexp.MustCompile(`\s+`)
-	optionLabel   = regexp.MustCompile(`^[A-Za-z][.、)）:：\s]+`)
+	tagPattern   = regexp.MustCompile(`<[^>]+>`)
+	spacePattern = regexp.MustCompile(`\s+`)
+	optionLabel  = regexp.MustCompile(`^[A-Za-z][.、)）:：\s]+`)
 )
 
 // Solver 完成一次答题：图片处理、模型调用与答案解析。
@@ -110,42 +110,7 @@ func buildPrompt(title, options, kind string) string {
 }
 
 func extractAnswer(content, reasoning, kind string) string {
-	raw := ""
-	tagged := false
-	for _, value := range []string{content, reasoning} {
-		for _, match := range answerPattern.FindAllStringSubmatch(value, -1) {
-			tagged = true
-			if raw = strings.TrimSpace(match[1]); raw != "" {
-				break
-			}
-		}
-		if raw != "" {
-			break
-		}
-	}
-	if raw == "" {
-		if tagged {
-			return ""
-		}
-		return strings.TrimSpace(content)
-	}
-	if kind == "completion" {
-		return raw
-	}
-	if raw == "对" || raw == "错" {
-		return raw
-	}
-	letters := regexp.MustCompile(`[A-Za-z]`).FindAllString(raw, -1)
-	if len(letters) > 0 {
-		if kind == "multiple" {
-			for i := range letters {
-				letters[i] = strings.ToUpper(letters[i])
-			}
-			return strings.Join(letters, "#")
-		}
-		return strings.ToUpper(letters[0])
-	}
-	return raw
+	return engine.ExtractAnswer(content, reasoning, kind)
 }
 
 // directContent 构造直传图片的消息内容：图片交给回答模型自行理解。
@@ -218,12 +183,12 @@ func (s *Solver) solve(ctx context.Context, title, options, kind string, inlineI
 	var caption *captionTask
 	if cfg.Answer.Caption.Model != "" {
 		captionModel := cfg.Answer.Caption
-		caption = &captionTask{run: func(callCtx context.Context, data []byte) (string, error) {
+		caption = &captionTask{Run: func(callCtx context.Context, data []byte) (string, error) {
 			describeCtx := s.modelContext(callCtx, "caption", captionService, captionModel)
 			return s.models.describe(describeCtx, captionService, captionModel, cfg.Answer.CaptionPrompt, data)
 		}}
 	}
-	processedTitle, processedOptions, infos, images, err := s.images.process(ctx, title, options, caption, direct, inlineImages)
+	processedTitle, processedOptions, infos, images, err := s.images.Process(ctx, title, options, caption, direct, inlineImages)
 	result.ProcessedTitle, result.ProcessedOptions, result.Images = processedTitle, processedOptions, infos
 	if err != nil {
 		result.Answer = "ERROR: " + err.Error()

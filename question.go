@@ -1,14 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"encoding/base64"
-	"errors"
 	"fmt"
-	"image"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/onprs/OCS-Tiku/internal/engine"
 )
 
 const maxSearchRequestBytes = 32 << 20
@@ -61,34 +60,10 @@ func (q searchRequest) prepare() (string, string, map[string][]byte, error) {
 }
 
 func decodeInlineImage(raw string) ([]byte, error) {
-	header, encoded, ok := strings.Cut(raw, ",")
-	header = strings.ToLower(header)
-	if !ok || !strings.HasPrefix(header, "data:image/") || !strings.HasSuffix(header, ";base64") {
-		return nil, errors.New("需要 Base64 图片 data URL")
-	}
-	if len(encoded) > base64.StdEncoding.EncodedLen(20<<20) {
-		return nil, errors.New("图片超过 20 MB")
-	}
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, errors.New("Base64 编码无效")
-	}
-	if len(data) > 20<<20 {
-		return nil, errors.New("图片超过 20 MB")
-	}
-	// OCS 会统一 data URL 的 MIME 前缀，格式以实际图片内容为准。
-	if _, err := imageExtension(data); err != nil {
-		return nil, err
-	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
-		return nil, errors.New("图片内容无效")
-	}
-	if cfg.Width < 1 || cfg.Height < 1 || int64(cfg.Width)*int64(cfg.Height) > 16000000 {
-		return nil, errors.New("图片尺寸无效")
-	}
-	if len(data) > 5<<20 {
-		return shrinkImage(data)
-	}
-	return data, nil
+	return engine.DecodeInlineImage(raw, engine.InlineImageLimits{
+		MaxEncodedBytes: int64(base64.StdEncoding.EncodedLen(20 << 20)),
+		MaxBytes:        20 << 20,
+		MaxPixels:       16000000,
+		ShrinkBytes:     5 << 20,
+	})
 }

@@ -54,7 +54,7 @@ func TestGeminiUsesSharedHTTPTimeout(t *testing.T) {
 	defer fake.Close()
 	var called atomic.Bool
 	client := newModelClient()
-	client.http = &http.Client{Timeout: 20 * time.Millisecond, Transport: modelTransportFunc(func(request *http.Request) (*http.Response, error) {
+	client.HTTP = &http.Client{Timeout: 20 * time.Millisecond, Transport: modelTransportFunc(func(request *http.Request) (*http.Response, error) {
 		called.Store(true)
 		<-request.Context().Done()
 		return nil, request.Context().Err()

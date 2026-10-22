@@ -2,18 +2,11 @@ package main
 
 import (
 	"github.com/onprs/OCS-Tiku/internal/catalog"
+	"github.com/onprs/OCS-Tiku/internal/engine"
 )
 
 // Capability 是模型能力的最终判定结果。
-type Capability struct {
-	Vision    bool   `json:"vision"`
-	ToolCall  bool   `json:"tool_call"`
-	Reasoning bool   `json:"reasoning"`
-	Context   int    `json:"context"`
-	Matched   bool   `json:"matched"` // 是否在模型库中找到条目
-	Method    string `json:"method"`  // 匹配方式
-	Entry     string `json:"entry"`   // 命中的条目标识
-}
+type Capability = engine.Capability
 
 // capability 合并模型库推断与用户标注，用户标注优先。
 func (s *Solver) capability(service ServiceConfig, model ModelConfig) Capability {
@@ -27,19 +20,7 @@ func (s *Solver) capability(service ServiceConfig, model ModelConfig) Capability
 			}
 		}
 	}
-	switch model.Vision {
-	case CapabilityOn:
-		result.Vision = true
-	case CapabilityOff:
-		result.Vision = false
-	}
-	switch model.ToolCall {
-	case CapabilityOn:
-		result.ToolCall = true
-	case CapabilityOff:
-		result.ToolCall = false
-	}
-	return result
+	return engine.MergeCapability(result, model)
 }
 
 // catalogOf 返回当前模型库索引，未初始化时返回空。

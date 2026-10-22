@@ -35,6 +35,12 @@ logs/
 *.crt
 *.cer
 
+# fork 维护文件；AGENTS.md 不随公开仓库发布
+AGENTS.md
+.local/
+*.dsn
+ocs-tiku-fork.json
+
 # 本机调试脚本
 /test.py
 /testEdge.cjs

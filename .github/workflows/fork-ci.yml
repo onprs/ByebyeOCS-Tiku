@@ -1,0 +1,95 @@
+name: fork 验证
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -p=2
+
+jobs:
+  go:
+    name: Go 测试与构建
+    runs-on: ubuntu-latest
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 设置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+      - name: 单元与契约测试
+        run: go test ./...
+      - name: 静态检查
+        run: go vet ./...
+      - name: 构建 platform 命令
+        run: go build ./cmd/ocs-tiku-fork
+      - name: 确认 platform 不依赖 SQLite
+        run: |
+          if go list -deps ./cmd/ocs-tiku-fork | grep -q 'modernc.org/sqlite'; then
+            echo 'platform 命令不得依赖 SQLite' >&2
+            exit 1
+          fi
+
+  postgres:
+    name: PostgreSQL 集成测试
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 设置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+      - name: 准备隔离测试连接文件
+        run: |
+          printf 'postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' > "$RUNNER_TEMP/ocs-tiku-test.dsn"
+      - name: 运行全部测试
+        env:
+          BYEBYEOCS_TIKU_TEST_DATABASE_DSN_FILE: ${{ runner.temp }}/ocs-tiku-test.dsn
+        run: go test -race ./...
+
+  v1-ui:
+    name: v1 网页与单文件构建
+    runs-on: ubuntu-latest
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 设置 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+      - name: 设置 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装前端依赖
+        run: npm --prefix frontend ci --no-audit --no-fund
+      - name: 构建网页
+        run: npm --prefix frontend run build
+      - name: 检查前端
+        run: npm --prefix frontend run lint
+      - name: 内置网页测试
+        run: go test -tags ocs_frontend .

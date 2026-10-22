@@ -138,20 +138,20 @@ func TestImageProcessingFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			processor.fetch = func(_ context.Context, url string) ([]byte, error) {
+			processor.Fetch = func(_ context.Context, url string) ([]byte, error) {
 				if failure == "download" || failure == "partial" && strings.HasSuffix(url, "b.png") {
 					return nil, errors.New("HTTP 404")
 				}
 				return imageData.Bytes(), nil
 			}
-			caption := &captionTask{run: func(context.Context, []byte) (string, error) {
+			caption := &captionTask{Run: func(context.Context, []byte) (string, error) {
 				if failure == "caption" {
 					return "", errors.New("转述模型失败")
 				}
 				return "  ", nil
 			}}
 			direct := failure == "download" || failure == "partial"
-			_, _, infos, _, err := processor.process(t.Context(), "https://images.example.com/a.png", "https://images.example.com/b.png", caption, direct, nil)
+			_, _, infos, _, err := processor.Process(t.Context(), "https://images.example.com/a.png", "https://images.example.com/b.png", caption, direct, nil)
 			if err == nil || len(infos) != 2 || infos[1].Status != "failed" {
 				t.Fatalf("图片失败未传播: %+v %v", infos, err)
 			}
@@ -168,7 +168,7 @@ func TestMissingQuestionImageDoesNotCallAnswerModel(t *testing.T) {
 	}))
 	defer fake.Close()
 	configureAnswer(t, s, ServiceConfig{Protocol: ProtocolOpenAIChat, BaseURL: fake.URL, APIKey: "test-key"}, ModelConfig{Model: "answer-model", Vision: CapabilityOn})
-	s.solver.images.fetch = func(context.Context, string) ([]byte, error) { return nil, errors.New("HTTP 404") }
+	s.solver.images.Fetch = func(context.Context, string) ([]byte, error) { return nil, errors.New("HTTP 404") }
 	requestJSON(t, web, "POST", "/api/search", map[string]string{"title": "识别图形 https://images.example.com/question.png"}, 500, nil)
 	if calls.Load() != 0 {
 		t.Fatal("题图缺失时仍调用了回答模型")

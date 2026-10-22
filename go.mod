@@ -1,6 +1,6 @@
 module github.com/onprs/OCS-Tiku
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/cloudwego/eino v0.9.21
@@ -8,9 +8,16 @@ require (
 	github.com/cloudwego/eino-ext/components/model/gemini v0.1.36
 	github.com/cloudwego/eino-ext/components/model/ollama v0.1.9
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+	github.com/jackc/pgx/v5 v5.11.0
 	google.golang.org/genai v1.70.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.44.3
+)
+
+require (
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 )
 
 require (

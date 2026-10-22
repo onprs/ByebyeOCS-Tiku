@@ -1,13 +1,5 @@
 package main
 
-// 协议标识，决定使用哪套调用组件与消息编码。
-const (
-	ProtocolOpenAIChat        = "openai-chat"
-	ProtocolAnthropicMessages = "anthropic-messages"
-	ProtocolGeminiGenerate    = "gemini-generate-content"
-	ProtocolOllamaChat        = "ollama-chat"
-)
-
 // protocols 是全部可用协议。
 var protocols = []string{
 	ProtocolOpenAIChat, ProtocolAnthropicMessages, ProtocolGeminiGenerate, ProtocolOllamaChat,

@@ -1,24 +1,26 @@
-name: 发布
+name: 发布（手动授权）
 
 on:
-  push:
-    tags:
-      - 'v[0-9]*'
   workflow_dispatch:
     inputs:
       tag:
         description: 需要发布的现有版本标签
         required: true
         type: string
+      publish:
+        description: 确认创建并发布 GitHub Release
+        required: true
+        default: false
+        type: boolean
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_TAG: ${{ inputs.tag }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -52,8 +54,10 @@ jobs:
         run: npm --prefix frontend run test:browser
       - name: 后端测试
         run: go test . ./internal/catalog ./tools/snapshot
+      - name: 内置网页测试
+        run: go test -tags ocs_frontend .
       - name: 后端静态检查
-        run: go vet . ./internal/catalog ./tools/snapshot
+        run: go vet . ./internal/catalog ./tools/snapshot ./cmd/ocs-tiku-fork ./internal/engine ./internal/platform/...
       - name: 构建发布文件
         run: bash scripts/build-release.sh "$RELEASE_TAG"
       - name: 验证单文件启动
@@ -67,9 +71,11 @@ jobs:
           retention-days: 7
 
   publish:
-    name: 发布 Release
+    name: 发布 Release（需要显式授权）
+    if: ${{ inputs.publish == true }}
     needs: build
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     steps:

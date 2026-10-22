@@ -53,7 +53,7 @@ func setupServer(t *testing.T) (*Server, *httptest.Server, string) {
 	}
 	models := newModelClient()
 	s := &Server{config: cfg, store: store, models: models, catalog: modelCatalog,
-		assets: os.DirFS(assets), imageDir: images.dir}
+		assets: os.DirFS(assets), imageDir: images.Dir}
 	s.solver = &Solver{config: cfg, models: models, images: images, catalog: modelCatalog, store: store}
 	web := httptest.NewServer(s.handler())
 	t.Cleanup(web.Close)
@@ -190,7 +190,7 @@ func TestImagePaths(t *testing.T) {
 	if err := png.Encode(&pngData, image); err != nil {
 		t.Fatal(err)
 	}
-	s.solver.images.fetch = func(_ context.Context, _ string) ([]byte, error) { return pngData.Bytes(), nil }
+	s.solver.images.Fetch = func(_ context.Context, _ string) ([]byte, error) { return pngData.Bytes(), nil }
 	input := map[string]string{"title": "题目 https://example.org/a.png", "options": "答案甲\n答案乙", "type": "single"}
 
 	// 场景一：回答模型标注为支持图片，图片直接交给回答模型。
@@ -423,8 +423,8 @@ func TestLargeImageIsReduced(t *testing.T) {
 	if input.Len() <= 5<<20 {
 		t.Fatalf("测试图片过小: %d", input.Len())
 	}
-	p.http = &http.Client{Transport: imageRoundTripper{data: input.Bytes()}}
-	result, err := p.download(context.Background(), "https://example.org/image.png")
+	p.HTTP = &http.Client{Transport: imageRoundTripper{data: input.Bytes()}}
+	result, err := p.Download(context.Background(), "https://example.org/image.png")
 	if err != nil {
 		t.Fatal(err)
 	}

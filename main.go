@@ -80,7 +80,7 @@ func main() {
 	models := newModelClient()
 	server := &Server{config: config, store: store, models: models, catalog: modelCatalog,
 		solver: &Solver{config: config, models: models, images: images, catalog: modelCatalog, store: store},
-		assets: assets, imageDir: images.dir, address: address}
+		assets: assets, imageDir: images.Dir, address: address}
 	go refreshModels(modelCatalog)
 	log.Printf("OCS 题库服务: http://%s", address)
 	log.Fatal(http.ListenAndServe(address, server.handler()))

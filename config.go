@@ -14,35 +14,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// 能力标注取值：auto 表示使用模型库推断结果，on/off 表示强制覆盖。
-const (
-	CapabilityAuto = "auto"
-	CapabilityOn   = "on"
-	CapabilityOff  = "off"
-)
+// 能力标注常量与配置类型由 internal/engine 提供，v1 与 platform v2 共用。
 
 var (
 	serviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	errServiceExists = errors.New("服务标识已存在，请使用其他标识")
 )
-
-// ServiceConfig 是一个服务条目：协议、端点与凭据。
-type ServiceConfig struct {
-	Name     string `json:"name" yaml:"name"`
-	Protocol string `json:"protocol" yaml:"protocol"`
-	BaseURL  string `json:"base_url" yaml:"base_url"`
-	APIKey   string `json:"api_key" yaml:"api_key"`
-	Vendor   string `json:"vendor,omitempty" yaml:"vendor,omitempty"`
-}
-
-// ModelConfig 是一个模型选择：引用服务条目并指定模型与能力标注。
-type ModelConfig struct {
-	Service         string `json:"service" yaml:"service"`
-	Model           string `json:"model" yaml:"model"`
-	Vision          string `json:"vision" yaml:"vision"`
-	ToolCall        string `json:"tool_call" yaml:"tool_call"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"`
-}
 
 // AgentConfig 是 agent 模式配置。
 type AgentConfig struct {

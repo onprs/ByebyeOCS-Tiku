@@ -88,7 +88,7 @@ func TestSearchWithOCSInlineImages(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			s, web, _ := setupServer(t)
-			s.solver.images.fetch = func(context.Context, string) ([]byte, error) {
+			s.solver.images.Fetch = func(context.Context, string) ([]byte, error) {
 				return nil, errors.New("浏览器已上传图片，不应重新下载原地址")
 			}
 			var mu sync.Mutex
@@ -243,11 +243,11 @@ func TestInlineImageCacheKeepsDifferentQuestions(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, second := inlineTestPNG(t, 2, 2, 4), inlineTestPNG(t, 2, 2, 5)
-	firstURL, err := processor.save("[图片1]", first)
+	firstURL, err := processor.Save("[图片1]", first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondURL, err := processor.save("[图片1]", second)
+	secondURL, err := processor.Save("[图片1]", second)
 	if err != nil || firstURL == secondURL {
 		t.Fatalf("不同题目的同编号图片共用了缓存: %v", err)
 	}

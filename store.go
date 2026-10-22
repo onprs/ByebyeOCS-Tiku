@@ -12,13 +12,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type ImageInfo struct {
-	URL         string `json:"url"`
-	Description string `json:"description"`
-	Src         string `json:"src"`
-	Status      string `json:"status"`
-}
-
 type Record struct {
 	ID               int64       `json:"id"`
 	Timestamp        string      `json:"timestamp"`

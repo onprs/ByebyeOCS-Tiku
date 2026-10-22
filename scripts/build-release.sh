@@ -25,7 +25,7 @@ for target_os in linux windows darwin; do
     fi
     printf '构建 %s/%s\n' "$target_os" "$target_arch"
     CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" \
-      go build -p 2 -trimpath -ldflags "-s -w -X main.version=$release_version" \
+      go build -p 2 -trimpath -tags ocs_frontend -ldflags "-s -w -X main.version=$release_version" \
       -o "$output_dir/$filename" .
     artifacts+=("$filename")
   done
