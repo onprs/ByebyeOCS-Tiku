@@ -198,6 +198,12 @@ func serve(cfg *config.Config) error {
 		return err
 	}
 	st := store.New(pool)
+	readyCtx, readyCancel := context.WithTimeout(parent, 15*time.Second)
+	err = st.CheckSchema(readyCtx)
+	readyCancel()
+	if err != nil {
+		return err
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	// 每日低峰按有限批次清理过期缓存、幂等响应载荷、答案原文与调用明细；
 	// 幂等键、请求摘要与 token 汇总长期保留，旧键不会再次调用模型。

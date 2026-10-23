@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/onprs/OCS-Tiku/internal/platform/answer"
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
@@ -43,6 +45,15 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, serviceToken 
 	mux.HandleFunc("GET /internal/v1/usage", s.internalUsage)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := s.store.CheckSchema(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 	return s.wrap(mux)
 }
@@ -109,6 +120,8 @@ func routeName(r *http.Request) string {
 		return "internal_usage"
 	case r.URL.Path == "/healthz":
 		return "health"
+	case r.URL.Path == "/readyz":
+		return "readiness"
 	default:
 		return "not_found"
 	}
@@ -284,7 +297,9 @@ func (s *Server) internalCacheInvalidate(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &body, 64<<10, false) {
 		return
 	}
-	if strings.TrimSpace(body.Reason) == "" || len(body.Reason) > 500 {
+	// 主平台公开契约按字符允许最长 1000 字的失效原因；fork 内部接口保持同上限，
+	// 避免合法的中文长原因在这个边界被判为校验失败。
+	if strings.TrimSpace(body.Reason) == "" || utf8.RuneCountInString(body.Reason) > 1000 {
 		writeErrorV2(w, http.StatusUnprocessableEntity, "validation_failed", "失效原因不能为空或过长", "")
 		return
 	}

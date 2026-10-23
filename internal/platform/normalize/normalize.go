@@ -75,19 +75,16 @@ func Prepare(title, options, questionType string, rawImages []string, limits Lim
 	if len(rawImages) > limits.MaxImages {
 		return Question{}, fmt.Errorf("图片数量超过上限 %d", limits.MaxImages)
 	}
-	used := make(map[int]bool)
 	for _, match := range imagePattern.FindAllStringSubmatch(title+"\n"+options, -1) {
 		index, _ := strconv.Atoi(match[1])
 		if index < 1 || index > len(rawImages) {
 			return Question{}, fmt.Errorf("%s 缺少对应的图片数据", match[0])
 		}
-		used[index] = true
 	}
+	// [图片N] 只做定位校验；自动做题的题干来自平台 HTML，图片按 DOM 顺序附加，
+	// 不含占位标记，不能要求每张图片都被文本引用。
 	images := make([]Image, 0, len(rawImages))
 	for i, raw := range rawImages {
-		if !used[i+1] {
-			return Question{}, fmt.Errorf("第 %d 张图片缺少对应的 [图片%d] 标记", i+1, i+1)
-		}
 		item, err := decodeImage(raw, limits)
 		if err != nil {
 			return Question{}, fmt.Errorf("第 %d 张图片无效: %w", i+1, err)

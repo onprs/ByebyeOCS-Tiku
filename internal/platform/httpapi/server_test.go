@@ -40,6 +40,7 @@ type fakeLLM struct {
 	lastImages      int
 	lastAuth        string
 	lastShortAnswer bool
+	lastMaxTokens   int
 }
 
 func (f *fakeLLM) setMode(mode string) {
@@ -65,8 +66,9 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Model    string `json:"model"`
-		Messages []struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Messages  []struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
@@ -91,6 +93,7 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.lastImages = images
 		f.lastAuth = r.Header.Get("Authorization")
 		f.lastShortAnswer = shortAnswer
+		f.lastMaxTokens = body.MaxTokens
 	}
 	f.mu.Unlock()
 	if mode == "delay" {
@@ -891,4 +894,136 @@ func testPNG(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buffer.Bytes())
+}
+
+// fork 配置中不存在的模型属于入口校验失败：使用独立错误码，且不写请求记录、不调用模型，
+// 管理员补齐配置后同一 request_id 与幂等键可以直接重试。
+func TestV2UnknownModelIsNotConfigured(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	request := v2Request("缺失模型题", "A. 甲\nB. 乙", "cache_first", "req-absent-0001", "idem-absent-0001", nil)
+	request.ModelOfferingID = "absent-model"
+	recorder := answerV2(t, f, request, "idem-absent-0001")
+	if recorder.Code != http.StatusServiceUnavailable || decodeErrorCode(t, recorder) != "model_not_configured" {
+		t.Fatalf("未配置模型应明确分类：%d %s", recorder.Code, recorder.Body.String())
+	}
+	var count int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM tiku.requests WHERE idempotency_key = $1`,
+		"idem-absent-0001").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("入口校验失败不应留下幂等记录：%d", count)
+	}
+	if answers, _ := f.llm.counts(); answers != 0 {
+		t.Fatalf("未配置模型不应调用上游：%d", answers)
+	}
+}
+
+// 模型停用不再写入终态幂等记录：重新启用后同一幂等键可以完成作答，不重复计费。
+func TestModelDisabledLeavesNoIdempotencyRecord(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	if err := f.store.SetModelDisabled(context.Background(), "standard", true); err != nil {
+		t.Fatal(err)
+	}
+	request := v2Request("恢复题", "A. 甲\nB. 乙", "cache_first", "req-resume-0001", "idem-resume-0001", nil)
+	disabled := answerV2(t, f, request, "idem-resume-0001")
+	if disabled.Code != http.StatusConflict || decodeErrorCode(t, disabled) != "model_disabled" {
+		t.Fatalf("停用模型应返回 409：%d %s", disabled.Code, disabled.Body.String())
+	}
+	var count int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM tiku.requests WHERE idempotency_key = $1`,
+		"idem-resume-0001").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("停用检查发生在写入请求记录前，不应留下幂等记录：%d", count)
+	}
+	if err := f.store.SetModelDisabled(context.Background(), "standard", false); err != nil {
+		t.Fatal(err)
+	}
+	recovered := decodeResponse(t, answerV2(t, f, request, "idem-resume-0001"))
+	if recovered.Status != "answered" {
+		t.Fatalf("重新启用后应完成作答：%#v", recovered)
+	}
+	if answers, _ := f.llm.counts(); answers != 1 {
+		t.Fatalf("恢复后只应调用一次上游，实际 %d", answers)
+	}
+}
+
+// 主平台公开契约允许最长 1000 字的失效原因；中文按字符计数，不能按字节提前拒绝。
+func TestCacheInvalidationAcceptsLongReason(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	decodeResponse(t, answerV2(t, f, v2Request("失效长原因题", "A. 甲\nB. 乙", "cache_first", "req-invalidate-0001", "idem-invalidate-0001", nil), "idem-invalidate-0001"))
+	var entryID string
+	if err := f.pool.QueryRow(context.Background(), `SELECT id::text FROM tiku.cache_entries WHERE invalidated_at IS NULL`).Scan(&entryID); err != nil {
+		t.Fatal(err)
+	}
+	recorder := postJSON(t, f.handler, "/internal/v1/cache/invalidations", map[string]any{
+		"entry_id": entryID, "reason": strings.Repeat("核对失败原因", 100), "actor": "main-platform",
+	}, map[string]string{"Authorization": "Bearer " + testToken})
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"invalidated":true`) {
+		t.Fatalf("长中文原因应被接受：%d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// 自动做题的平台题干不含 [图片N] 占位标记：图片按 DOM 顺序附加时仍应作答；
+// 指向不存在图片的标记继续拒绝。
+func TestV2AcceptsImagesWithoutTextMarkers(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	imageURL := testPNG(t)
+	response := decodeResponse(t, answerV2(t, f,
+		v2Request("平台题干未带占位标记", "A. 甲\nB. 乙", "cache_first", "req-nomarker-0001", "idem-nomarker-0001", []string{imageURL}),
+		"idem-nomarker-0001"))
+	if response.Status != "answered" {
+		t.Fatalf("无占位标记的平台图片题应作答：%#v", response)
+	}
+	missing := answerV2(t, f,
+		v2Request("指向缺失图片[图片2]", "A. 甲", "cache_first", "req-missing-0001", "idem-missing-0001", []string{imageURL}),
+		"idem-missing-0001")
+	if missing.Code != http.StatusUnprocessableEntity || decodeErrorCode(t, missing) != "invalid_question" {
+		t.Fatalf("标记指向不存在图片应拒绝：%d %s", missing.Code, missing.Body.String())
+	}
+}
+
+// 输出预算只是上限：请求预算高于单个模型配置时按模型上限收敛作答，
+// 不再返回 budget_exceeded；低于请求预算或全局硬上限时不允许放大。
+func TestBudgetAboveModelLimitClampsToModelLimit(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	f.cfg.Models[0].MaxOutputTokens = 64
+	request := v2Request("低上限模型题", "A. 甲\nB. 乙", "cache_first", "req-budget-clamp-0001", "idem-budget-clamp-0001", nil)
+	request.Budget.MaxOutputTokens = 128
+	response := decodeResponse(t, answerV2(t, f, request, "idem-budget-clamp-0001"))
+	if response.Status != "answered" {
+		t.Fatalf("高于模型上限的预算应按上限收敛：%#v", response)
+	}
+	f.llm.mu.Lock()
+	got := f.llm.lastMaxTokens
+	f.llm.mu.Unlock()
+	if got != 64 {
+		t.Fatalf("模型调用应使用模型上限 64，实际 %d", got)
+	}
+
+	smaller := v2Request("低预算题", "A. 甲\nB. 乙", "cache_first", "req-budget-small-0001", "idem-budget-small-0001", nil)
+	smaller.Budget.MaxOutputTokens = 32
+	decodeResponse(t, answerV2(t, f, smaller, "idem-budget-small-0001"))
+	f.llm.mu.Lock()
+	got = f.llm.lastMaxTokens
+	f.llm.mu.Unlock()
+	if got != 32 {
+		t.Fatalf("请求预算低于模型上限时不能放大，实际 %d", got)
+	}
+}
+
+// 服务级硬上限仍拒绝：单次请求不能超过部署允许的输出规模。
+func TestBudgetAboveServerCapRejected(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true, caption: true})
+	request := v2Request("超全局预算题", "A. 甲\nB. 乙", "cache_first", "req-budget-cap-0001", "idem-budget-cap-0001", nil)
+	request.Budget.MaxOutputTokens = f.cfg.Limits.MaxOutputTokens + 1
+	recorder := answerV2(t, f, request, "idem-budget-cap-0001")
+	if recorder.Code != http.StatusUnprocessableEntity || decodeErrorCode(t, recorder) != "budget_exceeded" {
+		t.Fatalf("超过服务全局上限应拒绝：%d %s", recorder.Code, recorder.Body.String())
+	}
+	if answers, _ := f.llm.counts(); answers != 0 {
+		t.Fatalf("预算被拒绝时不应调用上游：%d", answers)
+	}
 }

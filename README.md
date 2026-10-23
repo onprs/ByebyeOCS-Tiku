@@ -46,7 +46,7 @@ cp ocs-tiku-fork.example.json ocs-tiku-fork.json
 ./ocs-tiku-fork serve -config ocs-tiku-fork.json
 ```
 
-默认监听 `127.0.0.1:8093`。服务启动不会自动迁移或创建默认模型。访问接口需要服务令牌；ByebyeOCS 中的题库地址和令牌应与此处一致。
+默认监听 `127.0.0.1:8093`。启动前需显式完成对应版本迁移，未迁移或版本不匹配时服务会退出；服务不会创建默认模型。访问接口需要服务令牌；ByebyeOCS 中的题库地址和令牌应与此处一致。可用性检查使用`/readyz`，存活检查使用`/healthz`。
 
 ## 使用
 

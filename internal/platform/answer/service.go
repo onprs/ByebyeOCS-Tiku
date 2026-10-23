@@ -160,6 +160,15 @@ func (s *Service) Answer(ctx context.Context, req Request, idempotencyKey string
 		return nil, err
 	}
 	fingerprint := fingerprint(req, idempotencyKey)
+	// 模型停用与声明参数都在写入请求记录前判定：这里既不调用模型，也不留下
+	// 终态幂等记录；管理员恢复配置或启用模型后，同一请求键可以重新执行。
+	disabled, err := s.store.ModelDisabled(ctx, model.ID)
+	if err != nil {
+		return nil, newError("internal_error", "无法读取模型状态", 500, false)
+	}
+	if disabled || model.Disabled {
+		return nil, newError("model_disabled", "该模型已下架，请重新选择", 409, false)
+	}
 	created, record, err := s.store.BeginRequest(ctx, idempotencyKey, req.RequestID, fingerprint)
 	if err != nil {
 		return nil, newError("internal_error", "无法保存请求幂等记录", 500, false)
@@ -169,15 +178,6 @@ func (s *Service) Answer(ctx context.Context, req Request, idempotencyKey string
 	}
 	if !created {
 		return s.replay(ctx, record, idempotencyKey, req.RequestID, fingerprint)
-	}
-	disabled, err := s.store.ModelDisabled(ctx, model.ID)
-	if err != nil {
-		_ = s.store.FailRequest(context.Background(), idempotencyKey, "internal_error")
-		return nil, newError("internal_error", "无法读取模型状态", 500, false)
-	}
-	if disabled || model.Disabled {
-		_ = s.store.FailRequest(context.Background(), idempotencyKey, "model_disabled")
-		return nil, newError("model_disabled", "该模型已下架，请重新选择", 409, false)
 	}
 	resp, err := s.execute(ctx, req, model, prepared, key, scopeHash, idempotencyKey)
 	if err != nil {
@@ -330,7 +330,9 @@ func (s *Service) validate(req Request) (*config.Model, normalize.Question, stri
 	}
 	model := s.cfg.Model(modelID)
 	if model == nil {
-		return nil, normalize.Question{}, "", "", newError("model_unavailable", "模型条目不存在或未配置", 503, false)
+		// 使用独立错误码：这里在写入请求记录前就失败，没有模型调用或费用，
+		// 与上游调用阶段的 model_unavailable 区分，调用方可安全重试。
+		return nil, normalize.Question{}, "", "", newError("model_not_configured", "模型条目不存在或未配置", 503, false)
 	}
 	prepared, err := normalize.Prepare(req.Question.Title, req.Question.Options, req.Question.Type, req.Question.Images, normalize.Limits{
 		MaxImages: s.cfg.Limits.MaxImages, MaxImageBytes: s.cfg.Limits.MaxImageBytes, MaxImagePixels: s.cfg.Limits.MaxImagePixels,
@@ -341,9 +343,12 @@ func (s *Service) validate(req Request) (*config.Model, normalize.Question, stri
 	if req.Budget.MaxOutputTokens < 0 {
 		return nil, normalize.Question{}, "", "", newError("budget_invalid", "输出预算无效", 422, false)
 	}
-	limit := model.EffectiveMaxOutputTokens(s.cfg.Limits.MaxOutputTokens)
-	if req.Budget.MaxOutputTokens > limit {
-		return nil, normalize.Question{}, "", "", newError("budget_exceeded", fmt.Sprintf("输出预算不能超过 %d", limit), 422, false)
+	// 输出预算只是上限：高于单个模型配置时由 solve 按 min(模型上限, 预算) 收敛，
+	// 不能因此拒绝请求——自动做题固定发送的预算会让低上限模型永远失败。
+	// 服务级硬上限仍然拒绝：单次请求不能超过部署允许的输出规模。
+	if req.Budget.MaxOutputTokens > s.cfg.Limits.MaxOutputTokens {
+		return nil, normalize.Question{}, "", "", newError("budget_exceeded",
+			fmt.Sprintf("输出预算不能超过 %d", s.cfg.Limits.MaxOutputTokens), 422, false)
 	}
 	scopeHash := normalize.ScopeKeyHash(req.CacheScope, req.CacheScopeKey)
 	key := normalize.CacheKey(model.ID, s.cfg.PromptVersion, s.cfg.NormalizationVersion,
