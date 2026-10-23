@@ -26,6 +26,19 @@ var migrationFiles embed.FS
 
 const migrateLockID int64 = 726239184002
 
+// cleanupTimeout 限制回滚等后台清理；连接异常时不能让请求协程无限等待。
+const cleanupTimeout = 5 * time.Second
+
+// rollback 以有界上下文回滚事务，避免连接异常时无限等待。
+func rollback(tx pgx.Tx) {
+	if tx == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_ = tx.Rollback(ctx)
+}
+
 type Store struct{ pool *pgxpool.Pool }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -94,7 +107,7 @@ func (s *Store) Migrate(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, errors.New("无法开启迁移事务")
 	}
-	defer tx.Rollback(context.Background())
+	defer rollback(tx)
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", migrateLockID); err != nil {
 		return 0, errors.New("无法取得迁移锁")
 	}
@@ -207,15 +220,6 @@ func (s *Store) CompleteRequest(ctx context.Context, key string, response []byte
 	return err
 }
 
-// PruneRequests 清理超过保留期且已结束的幂等记录；pending 记录保留给崩溃恢复核对。
-func (s *Store) PruneRequests(ctx context.Context, before time.Time) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM tiku.requests WHERE state <> 'pending' AND created_at < $1`, before)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
-}
-
 // FailRequest 保存确定性失败，避免同键重试再次产生模型调用。
 func (s *Store) FailRequest(ctx context.Context, key, code string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE tiku.requests SET state = 'failed', error_code = $2, completed_at = now()
@@ -277,7 +281,7 @@ func (s *Store) PutCache(ctx context.Context, e CacheEntry) (string, bool, error
 	if err != nil {
 		return "", false, err
 	}
-	defer tx.Rollback(context.Background())
+	defer rollback(tx)
 	if _, err := tx.Exec(ctx, `UPDATE tiku.cache_entries SET invalidated_at = now(), invalidation_reason = 'expired', invalidated_by = 'system'
 		WHERE cache_key = $1 AND invalidated_at IS NULL AND expires_at <= now()`, e.CacheKey); err != nil {
 		return "", false, err

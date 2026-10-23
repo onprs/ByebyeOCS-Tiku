@@ -688,6 +688,62 @@ func TestTimeoutLeavesUnknownFactWithoutReplay(t *testing.T) {
 	}
 }
 
+// 缓存只是优化：写入失败不能把已成功的模型作答变成 500 或丢失幂等结果。
+func TestCacheWriteFailureDoesNotFailAnswer(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true})
+	ctx := context.Background()
+	if _, err := f.pool.Exec(ctx, `CREATE FUNCTION block_cache_write() RETURNS trigger LANGUAGE plpgsql AS $body$
+		BEGIN
+			RAISE EXCEPTION 'blocked cache write';
+		END $body$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(ctx, `CREATE TRIGGER block_cache_write BEFORE INSERT ON tiku.cache_entries
+		FOR EACH ROW EXECUTE FUNCTION block_cache_write()`); err != nil {
+		t.Fatal(err)
+	}
+	body := v2Request("缓存写入失败题", "A. 甲", "cache_first", "req-cache-fail-0001", "idem-cache-fail-0001", nil)
+	first := decodeResponse(t, answerV2(t, f, body, "idem-cache-fail-0001"))
+	if first.Status != "answered" || first.Answer != "A" || !first.Usage.Complete {
+		t.Fatalf("缓存写入失败不应影响作答：%#v", first)
+	}
+	replay := decodeResponse(t, answerV2(t, f, body, "idem-cache-fail-0001"))
+	if replay.RequestID != first.RequestID || replay.Answer != first.Answer {
+		t.Fatalf("幂等结果必须可重放：%#v", replay)
+	}
+	if answers, _ := f.llm.counts(); answers != 1 {
+		t.Fatalf("缓存写入失败不应导致重复调用模型，实际 %d", answers)
+	}
+	var entries int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM tiku.cache_entries`).Scan(&entries); err != nil || entries != 0 {
+		t.Fatalf("缓存写入失败时不应留下条目：%d/%v", entries, err)
+	}
+}
+
+// 进程在调用中途崩溃会留下 pending 幂等记录；超过上游调用时限后同键重试必须
+// 返回结果不明，而不是一直等待并反复查询数据库。
+func TestStalePendingReplayReturnsUnknown(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true})
+	body := v2Request("崩溃恢复题", "A. 甲", "cache_first", "req-crash-0001", "idem-crash-0001", nil)
+	_ = decodeResponse(t, answerV2(t, f, body, "idem-crash-0001"))
+	if _, err := f.pool.Exec(context.Background(), `UPDATE tiku.requests SET state = 'pending', response = NULL,
+		error_code = NULL, completed_at = NULL, created_at = now() - interval '10 minutes'
+		WHERE idempotency_key = $1`, "idem-crash-0001"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	recorder := answerV2(t, f, body, "idem-crash-0001")
+	if recorder.Code != http.StatusConflict || decodeErrorCode(t, recorder) != "request_unknown" {
+		t.Fatalf("陈旧 pending 应返回 request_unknown：%d %s", recorder.Code, recorder.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("陈旧 pending 不应长时间轮询：%v", elapsed)
+	}
+	if answers, _ := f.llm.counts(); answers != 1 {
+		t.Fatalf("陈旧 pending 重试不得再次调用模型，实际 %d", answers)
+	}
+}
+
 func TestSharedCacheRequiresExplicitEnable(t *testing.T) {
 	f := newFixture(t, fixtureOptions{vision: true, caption: true, shared: false})
 	request := v2Request("共享题", "A. 甲", "cache_first", "req-shared-0001", "idem-shared-0001", nil)
@@ -696,6 +752,129 @@ func TestSharedCacheRequiresExplicitEnable(t *testing.T) {
 	recorder := answerV2(t, f, request, "idem-shared-0001")
 	if recorder.Code != http.StatusConflict || decodeErrorCode(t, recorder) != "shared_cache_disabled" {
 		t.Fatalf("共享缓存未开启应拒绝：%d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// 保留清理：过期缓存/答案/调用明细被清理，幂等键与 token 汇总保留，旧键不会再次付费。
+func TestCleanupRetainsIdempotencyAndTokenTotals(t *testing.T) {
+	f := newFixture(t, fixtureOptions{vision: true})
+	ctx := context.Background()
+	oldBody := v2Request("旧清理题", "A. 甲", "cache_first", "req-clean-old-0001", "idem-clean-old-0001", nil)
+	_ = decodeResponse(t, answerV2(t, f, oldBody, "idem-clean-old-0001"))
+	contentBody := v2Request("到期内容题", "A. 甲", "cache_first", "req-clean-content", "idem-clean-content", nil)
+	_ = decodeResponse(t, answerV2(t, f, contentBody, "idem-clean-content"))
+	freshBody := v2Request("新清理题", "A. 甲", "cache_first", "req-clean-new-0001", "idem-clean-new-0001", nil)
+	_ = decodeResponse(t, answerV2(t, f, freshBody, "idem-clean-new-0001"))
+	if created, _, err := f.store.BeginRequest(ctx, "idem-clean-pending", "req-clean-pending", strings.Repeat("a", 64)); err != nil || !created {
+		t.Fatalf("构造 pending 失败：%v/%v", created, err)
+	}
+	if created, _, err := f.store.BeginRequest(ctx, "idem-clean-failed", "req-clean-failed", strings.Repeat("b", 64)); err != nil || !created {
+		t.Fatalf("构造 failed 失败：%v/%v", created, err)
+	}
+	if err := f.store.FailRequest(ctx, "idem-clean-failed", "invalid_question"); err != nil {
+		t.Fatal(err)
+	}
+	// 旧时间戳夹具，不等待真实天数。
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := f.pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`UPDATE tiku.requests SET created_at = now() - interval '40 days'
+		WHERE idempotency_key IN ('idem-clean-old-0001', 'idem-clean-pending', 'idem-clean-failed')`)
+	exec(`UPDATE tiku.queries SET created_at = now() - interval '40 days'
+		WHERE idempotency_key = 'idem-clean-old-0001'`)
+	exec(`UPDATE tiku.model_calls SET created_at = now() - interval '40 days'
+		WHERE request_id = 'req-clean-old-0001'`)
+	exec(`UPDATE tiku.cache_entries SET expires_at = now() - interval '40 days'
+		WHERE question_title = '旧清理题'`)
+	// 内容按7天到期；调用明细按30天处理，缓存到期后无需额外保留原文。
+	exec(`UPDATE tiku.requests SET created_at = now() - interval '8 days' WHERE idempotency_key = 'idem-clean-content'`)
+	exec(`UPDATE tiku.queries SET created_at = now() - interval '8 days' WHERE idempotency_key = 'idem-clean-content'`)
+	exec(`UPDATE tiku.model_calls SET created_at = now() - interval '8 days' WHERE request_id = 'req-clean-content'`)
+	exec(`UPDATE tiku.cache_entries SET expires_at = now() - interval '1 hour' WHERE question_title = '到期内容题'`)
+
+	result, err := f.store.Cleanup(ctx, time.Now(), 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CacheEntries != 2 || result.RequestPayloads != 2 || result.QueryAnswers != 2 || result.ModelCalls != 1 {
+		t.Fatalf("清理计数不符：%#v", result)
+	}
+
+	var key, requestID, fingerprint, state string
+	var response []byte
+	if err := f.pool.QueryRow(ctx, `SELECT idempotency_key, request_id, fingerprint, state, response
+		FROM tiku.requests WHERE idempotency_key = 'idem-clean-old-0001'`).
+		Scan(&key, &requestID, &fingerprint, &state, &response); err != nil {
+		t.Fatal(err)
+	}
+	if state != "expired" || len(response) != 0 || key != "idem-clean-old-0001" ||
+		requestID != "req-clean-old-0001" || len(fingerprint) != 64 {
+		t.Fatalf("过期幂等事实未正确保留：%s %q %q %q %q", state, key, requestID, fingerprint, response)
+	}
+
+	answersBefore, _ := f.llm.counts()
+	replay := answerV2(t, f, oldBody, "idem-clean-old-0001")
+	if replay.Code != http.StatusConflict || decodeErrorCode(t, replay) != "request_unknown" {
+		t.Fatalf("旧键不得重新调用：%d %s", replay.Code, replay.Body.String())
+	}
+	answersAfter, _ := f.llm.counts()
+	if answersAfter != answersBefore {
+		t.Fatalf("旧键重试不得再次调用模型：%d/%d", answersBefore, answersAfter)
+	}
+
+	var answerText *string
+	var usage []byte
+	if err := f.pool.QueryRow(ctx, `SELECT answer, usage FROM tiku.queries
+		WHERE request_id = 'req-clean-old-0001'`).Scan(&answerText, &usage); err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		TotalTokens *int64 `json:"total_tokens"`
+		Complete    bool   `json:"complete"`
+	}
+	if err := json.Unmarshal(usage, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if answerText != nil || parsed.TotalTokens == nil || *parsed.TotalTokens != 110 || !parsed.Complete {
+		t.Fatalf("答案应清理而 token 汇总保留：%v %#v", answerText, parsed)
+	}
+
+	var pendingState, failedState, failedCode string
+	if err := f.pool.QueryRow(ctx, `SELECT state FROM tiku.requests WHERE idempotency_key = 'idem-clean-pending'`).Scan(&pendingState); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pool.QueryRow(ctx, `SELECT state, COALESCE(error_code, '') FROM tiku.requests
+		WHERE idempotency_key = 'idem-clean-failed'`).Scan(&failedState, &failedCode); err != nil {
+		t.Fatal(err)
+	}
+	if pendingState != "pending" || failedState != "failed" || failedCode != "invalid_question" {
+		t.Fatalf("pending/failed 最小事实必须保留：%s/%s/%s", pendingState, failedState, failedCode)
+	}
+
+	var cacheCount, callCount int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM tiku.cache_entries`).Scan(&cacheCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM tiku.model_calls`).Scan(&callCount); err != nil {
+		t.Fatal(err)
+	}
+	if cacheCount != 1 || callCount != 2 {
+		t.Fatalf("缓存原文到期即清理，未满30天调用明细仍保留：%d/%d", cacheCount, callCount)
+	}
+	var retainedUsage []byte
+	if err := f.pool.QueryRow(ctx, `SELECT answer, usage FROM tiku.queries WHERE request_id = 'req-clean-content'`).Scan(&answerText, &retainedUsage); err != nil {
+		t.Fatal(err)
+	}
+	if answerText != nil || len(retainedUsage) == 0 {
+		t.Fatal("超过7天的答案应清理并保留token汇总")
+	}
+
+	fresh := decodeResponse(t, answerV2(t, f, freshBody, "idem-clean-new-0001"))
+	if fresh.Status != "answered" || fresh.Answer != "A" {
+		t.Fatalf("未过期结果仍应可重放：%#v", fresh)
 	}
 }
 

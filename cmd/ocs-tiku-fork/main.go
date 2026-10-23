@@ -198,27 +198,35 @@ func serve(cfg *config.Config) error {
 		return err
 	}
 	st := store.New(pool)
-	// 幂等记录按配置保留；清理任务只删除已结束记录，不触碰 pending。
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// 每日低峰按有限批次清理过期缓存、幂等响应载荷、答案原文与调用明细；
+	// 幂等键、请求摘要与 token 汇总长期保留，旧键不会再次调用模型。
 	go func() {
-		ticker := time.NewTicker(time.Hour)
+		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
-		prune := func() {
-			cleanupCtx, cancel := context.WithTimeout(parent, 10*time.Second)
+		cleanup := func() {
+			cleanupCtx, cancel := context.WithTimeout(parent, 30*time.Second)
 			defer cancel()
-			_, _ = st.PruneRequests(cleanupCtx, time.Now().Add(-cfg.IdempotencyRetention()))
+			result, err := st.Cleanup(cleanupCtx, time.Now(), cfg.IdempotencyRetention())
+			if err != nil {
+				logger.Warn("fork 数据清理未完成", "cache_entries", result.CacheEntries,
+					"request_payloads", result.RequestPayloads, "query_answers", result.QueryAnswers, "model_calls", result.ModelCalls)
+				return
+			}
+			logger.Info("fork 数据清理完成", "cache_entries", result.CacheEntries,
+				"request_payloads", result.RequestPayloads, "query_answers", result.QueryAnswers, "model_calls", result.ModelCalls)
 		}
-		prune()
+		cleanup()
 		for {
 			select {
 			case <-parent.Done():
 				return
 			case <-ticker.C:
-				prune()
+				cleanup()
 			}
 		}
 	}()
 	svc := answer.New(cfg, st, keys, client)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	handler := httpapi.New(cfg, svc, st, token, logger)
 	server := &http.Server{
 		Addr: cfg.Listen, Handler: handler,

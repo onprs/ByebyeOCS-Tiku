@@ -196,10 +196,29 @@ func (s *Service) Answer(ctx context.Context, req Request, idempotencyKey string
 	if err != nil {
 		return nil, newError("internal_error", "无法保存响应", 500, false)
 	}
-	if err := s.store.CompleteRequest(ctx, idempotencyKey, data); err != nil {
+	// 模型已成功时要让幂等事实可重放，不能因客户端断开而停在 pending。
+	persistCtx, cancelPersist := persistContext(ctx)
+	defer cancelPersist()
+	if err := s.store.CompleteRequest(persistCtx, idempotencyKey, data); err != nil {
 		return nil, newError("internal_error", "无法保存幂等响应", 500, false)
 	}
 	return resp, nil
+}
+
+// persistTimeout 限制已产生上游结果后的写库；不继承已取消的请求上下文，但不能无限等待。
+const persistTimeout = 5 * time.Second
+
+// pendingGrace 是崩溃遗留 pending 记录的额外宽限；超过上游调用总时限仍为 pending
+// 就视为结果不明，避免同键重试一直阻塞到调用方超时。
+const pendingGrace = 30 * time.Second
+
+// persistContext 让缓存、调用事实和幂等记录脱离调用方取消，并仍受有界超时约束。
+func persistContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
+}
+
+func (s *Service) pendingStale(record *store.RequestRecord) bool {
+	return s.now().Sub(record.CreatedAt) > s.cfg.Timeout()+pendingGrace
 }
 
 func fingerprint(req Request, key string) string {
@@ -215,6 +234,9 @@ func (s *Service) replay(ctx context.Context, record *store.RequestRecord, key, 
 	if record.IdempotencyKey != key || record.RequestID != requestID || record.Fingerprint != fingerprint {
 		return nil, newError("idempotency_conflict", "相同幂等键或 request_id 对应不同请求", 409, false)
 	}
+	// 同一请求的并发重试很少见；低频轮询避免在等待期间产生大量数据库查询。
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		switch record.State {
 		case "completed":
@@ -227,11 +249,18 @@ func (s *Service) replay(ctx context.Context, record *store.RequestRecord, key, 
 			return nil, errorFromCode(record.ErrorCode)
 		case "unknown":
 			return nil, newError("request_unknown", "上游调用结果未知，已保留幂等事实；请人工核对或重新发起新请求", 409, false)
+		case "expired":
+			// 响应载荷已按保留期清理；键仍保留，不会因旧键再次调用模型。
+			return nil, newError("request_unknown", "幂等结果已过期，已保留事实；不会再次调用模型", 409, false)
 		case "pending":
+			if s.pendingStale(record) {
+				// 原请求已超过上游调用时限，不会再写入结果，交人工核对。
+				return nil, newError("request_unknown", "上游调用结果未知，已保留幂等事实；请人工核对或重新发起新请求", 409, false)
+			}
 			select {
 			case <-ctx.Done():
 				return nil, newError("request_in_progress", "相同请求仍在处理中，请稍后重试", 409, true)
-			case <-time.After(50 * time.Millisecond):
+			case <-ticker.C:
 			}
 			next, err := s.store.FindRequest(ctx, key, requestID)
 			if err != nil {
@@ -343,7 +372,9 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 				Usage:     Usage{InputTokens: &zero, OutputTokens: &zero, TotalTokens: &zero, Complete: true, Calls: []Call{}},
 				LatencyMS: time.Since(start).Milliseconds(),
 			}
-			s.recordQuery(ctx, req, model.ID, scopeHash, idemKey, resp, entry.ID, entry.CreatedAt)
+			persistCtx, cancelPersist := persistContext(ctx)
+			s.recordQuery(persistCtx, req, model.ID, scopeHash, idemKey, resp, entry.ID, entry.CreatedAt)
+			cancelPersist()
 			return resp, nil
 		}
 	}
@@ -370,10 +401,14 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 		Model: modelInfo(model),
 		Mode:  req.Mode, Cache: CacheInfo{Hit: false}, Usage: usage, LatencyMS: latency,
 	}
-	s.recordCalls(ctx, req.RequestID, usage.Calls)
+	// 模型调用已成功，事实与缓存必须在有界后台上下文内写完，客户端断开不能丢失已付费结果。
+	persistCtx, cancelPersist := persistContext(ctx)
+	defer cancelPersist()
+	s.recordCalls(persistCtx, req.RequestID, usage.Calls)
 	if usage.Complete && strings.TrimSpace(answer) != "" {
 		expires := s.now().Add(time.Duration(s.cfg.Cache.TTLDays) * 24 * time.Hour)
-		_, _, err := s.store.PutCache(ctx, store.CacheEntry{
+		// 缓存只是优化：写入失败不能让已成功的模型作答失败或丢失幂等结果。
+		_, _, _ = s.store.PutCache(persistCtx, store.CacheEntry{
 			ID: store.NewUUID(), CacheKey: cacheKey, OfferingID: model.ID,
 			PromptVersion: s.cfg.PromptVersion, NormalizationVersion: s.cfg.NormalizationVersion,
 			Scope: req.CacheScope, ScopeKeyHash: scopeHash,
@@ -381,11 +416,8 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 			QuestionType: prepared.Type, ImagesDigest: normalize.ImagesDigest(prepared.Images),
 			Answer: answer, SourceRequestID: req.RequestID, ExpiresAt: expires,
 		})
-		if err != nil {
-			return nil, newError("internal_error", "无法写入精确缓存", 500, false)
-		}
 	}
-	s.recordQuery(ctx, req, model.ID, scopeHash, idemKey, resp, "", time.Time{})
+	s.recordQuery(persistCtx, req, model.ID, scopeHash, idemKey, resp, "", time.Time{})
 	return resp, nil
 }
 
@@ -589,8 +621,10 @@ func (s *Service) Legacy(ctx context.Context, title, options, questionType strin
 		return "", "", err
 	}
 	requestID := "legacy_" + store.NewUUID()
-	s.recordCalls(context.Background(), requestID, usage.Calls)
-	_ = s.store.RecordQuery(context.Background(), store.QueryFact{
+	persistCtx, cancelPersist := persistContext(ctx)
+	defer cancelPersist()
+	s.recordCalls(persistCtx, requestID, usage.Calls)
+	_ = s.store.RecordQuery(persistCtx, store.QueryFact{
 		RequestID: requestID, OfferingID: model.ID, Mode: "always_llm",
 		Scope: "user", ScopeKeyHash: "legacy", Status: "answered", Answer: answer,
 		Usage: mustUsage(usage), LatencyMS: 0, CreatedAt: s.now(), CompletedAt: s.now(),
@@ -670,7 +704,7 @@ func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCo
 			result.Status = "failed"
 			result.ErrorCode = "request_cancelled"
 			result.LatencyMS = time.Since(start).Milliseconds()
-			_ = s.store.RecordModelTest(context.Background(), store.ModelTest{
+			_ = s.recordModelTest(testCtx, store.ModelTest{
 				ID: store.NewUUID(), ModelID: modelID, Kind: kind, Status: result.Status,
 				ErrorCode: result.ErrorCode, LatencyMS: result.LatencyMS, CostConfirmed: confirmCost, CreatedAt: s.now(),
 			})
@@ -712,11 +746,18 @@ func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCo
 			result.Reachable = true
 		}
 	}
-	_ = s.store.RecordModelTest(context.Background(), store.ModelTest{
+	_ = s.recordModelTest(ctx, store.ModelTest{
 		ID: store.NewUUID(), ModelID: modelID, Kind: kind, Status: result.Status,
 		ErrorCode: result.ErrorCode, LatencyMS: result.LatencyMS, CostConfirmed: confirmCost, CreatedAt: s.now(),
 	})
 	return result, nil
+}
+
+// recordModelTest 写入测试事实；调用方取消时仍以有界上下文保存结果。
+func (s *Service) recordModelTest(ctx context.Context, test store.ModelTest) error {
+	persistCtx, cancel := persistContext(ctx)
+	defer cancel()
+	return s.store.RecordModelTest(persistCtx, test)
 }
 
 func minInt(a, b int) int {

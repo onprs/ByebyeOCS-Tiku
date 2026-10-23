@@ -22,7 +22,7 @@ import (
 
 const (
 	DefaultDatabaseMaxConnections = 4
-	DefaultMaxRequestBytes        = 8 << 20
+	DefaultMaxRequestBytes        = 32 << 20
 	DefaultMaxImages              = 8
 	DefaultMaxImageBytes          = 5 << 20
 	DefaultMaxImagePixels         = 16000000
@@ -37,14 +37,16 @@ const (
 var modelIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
 
 type Limits struct {
-	MaxRequestBytes           int64 `json:"max_request_bytes"`
-	MaxImages                 int   `json:"max_images"`
-	MaxImageBytes             int64 `json:"max_image_bytes"`
-	MaxImagePixels            int64 `json:"max_image_pixels"`
-	MaxOutputTokens           int   `json:"max_output_tokens"`
-	Concurrency               int   `json:"concurrency"`
-	TimeoutSeconds            int   `json:"timeout_seconds"`
-	IdempotencyRetentionHours int   `json:"idempotency_retention_hours"`
+	MaxRequestBytes int64 `json:"max_request_bytes"`
+	MaxImages       int   `json:"max_images"`
+	MaxImageBytes   int64 `json:"max_image_bytes"`
+	MaxImagePixels  int64 `json:"max_image_pixels"`
+	MaxOutputTokens int   `json:"max_output_tokens"`
+	Concurrency     int   `json:"concurrency"`
+	TimeoutSeconds  int   `json:"timeout_seconds"`
+	// IdempotencyRetentionHours 是幂等响应载荷（答案）的保留期；幂等键、请求编号和
+	// 摘要长期保留，过期结果返回结果不明，不会再次调用模型。
+	IdempotencyRetentionHours int `json:"idempotency_retention_hours"`
 }
 
 type Cache struct {
