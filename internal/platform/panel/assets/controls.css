@@ -1,0 +1,48 @@
+/* 选择器、加载态和导航指示器。 */
+.custom-select { position: relative; width: 100%; min-width: 0; }
+.custom-select select[hidden] { display: none; }
+.select-trigger { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: var(--control-height); padding: 8px 12px; text-align: left; background: var(--input-bg); }
+.select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-chevron { flex-shrink: 0; width: 14px; color: var(--muted); }
+.select-listbox { position: fixed; z-index: 100; overflow-y: auto; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-menu); animation: select-enter 120ms ease-out; }
+.select-option { position: relative; min-height: 36px; padding: 8px 28px 8px 12px; border-radius: 4px; cursor: pointer; font-size: var(--font-secondary); }
+.select-option.highlighted { background: var(--surface-subtle); }
+.select-option[aria-selected=true] { color: var(--accent); background: var(--accent-soft); }
+.select-option[aria-selected=true]::after { content: "✓"; position: absolute; right: 10px; }
+.select-option[aria-disabled=true] { color: var(--muted); cursor: not-allowed; }
+.filters > .custom-select { width: 200px; }
+.appearance .custom-select { max-width: 300px; }
+.icon-button { display: inline-grid; place-items: center; width: 36px; height: 36px; min-height: 36px; flex-shrink: 0; padding: 8px; border: 0; color: var(--text-secondary); background: transparent; }
+.icon-button svg { width: 20px; height: 20px; }
+.navigation > .selection-indicator { position: absolute; top: 0; left: 0; z-index: 0; pointer-events: none; border-radius: var(--radius-sm); background: var(--sidebar-active); transition: transform 220ms cubic-bezier(.2, 0, 0, 1), width 220ms cubic-bezier(.2, 0, 0, 1), height 220ms cubic-bezier(.2, 0, 0, 1), opacity 120ms ease-out; }
+button.is-busy { position: relative; color: transparent; }
+button.is-busy::before { content: ""; position: absolute; top: calc(50% - 7px); left: calc(50% - 7px); width: 14px; height: 14px; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: busy-spin 800ms linear infinite; }
+button.primary.is-busy::before { border-color: var(--accent-contrast); border-right-color: transparent; }
+.skeleton { position: relative; overflow: hidden; height: 14px; border-radius: 4px; background: var(--surface-subtle); }
+.skeleton::after { position: absolute; content: ""; inset: 0; background: linear-gradient(90deg, transparent, var(--surface-strong), transparent); transform: translateX(-100%); animation: skeleton-sweep 1.2s linear infinite; }
+.skeleton-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; min-height: 56px; padding: 18px 16px; border-bottom: 1px solid var(--border); }
+.skeleton-row:first-child { background: var(--surface-subtle); }
+.skeleton-row:last-child { border-bottom: 0; }
+.page-progress { position: absolute; top: 0; left: 32px; right: 32px; height: 2px; overflow: hidden; pointer-events: none; }
+.page-progress::after { content: ""; position: absolute; inset: 0; background: var(--accent); transform: translateX(-100%); animation: skeleton-sweep 1.2s linear infinite; }
+.page:not(.is-loading) > .page-progress { display: none; }
+.page { position: relative; }
+.page-body.entering { animation: page-enter 160ms ease-out; }
+dialog[open] { animation: dialog-fade 160ms ease-out; }
+dialog.drawer[open] .dialog-body { animation: drawer-enter 220ms ease-out; }
+@keyframes dialog-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes select-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes page-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes drawer-enter { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+@keyframes skeleton-sweep { to { transform: translateX(100%); } }
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+@media (max-width: 760px) {
+  .filters > .custom-select { width: calc(50% - 6px); }
+  .select-trigger { min-height: var(--touch-height); }
+  .select-option { min-height: var(--touch-height); }
+  .icon-button { width: var(--touch-height); height: var(--touch-height); }
+  .page-progress { left: 16px; right: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

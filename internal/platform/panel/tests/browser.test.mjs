@@ -61,18 +61,27 @@ try {
       if (value) return value;
       await pause(50);
     }
-    throw new Error(`等待页面状态超时：${expression}`);
+    const detail = await evaluate(`({error:document.querySelector('dialog [role=alert]')?.textContent, invalid:[...document.querySelectorAll('dialog input, dialog select, dialog textarea')].filter(value=>!value.checkValidity()).map(value=>({name:value.name,message:value.validationMessage})), formLinked:!!document.querySelector('dialog button[type=submit]')?.form})`);
+    throw new Error(`等待页面状态超时：${expression}；表单状态：${JSON.stringify(detail)}`);
   };
   const click = label => evaluate(`(() => {
-    const element = [...document.querySelectorAll('button')].find(value => value.textContent.trim() === ${JSON.stringify(label)} && !value.disabled);
-    if (!element) throw new Error('未找到可用操作'); element.click();
+    const element = [...document.querySelectorAll('button')].find(value => (value.getAttribute('aria-label') || value.textContent.trim()) === ${JSON.stringify(label)} && !value.disabled);
+    if (!element) throw new Error('未找到可用操作');
+    const menu = element.closest('details');
+    if (menu) menu.open = true;
+    element.click();
   })()`);
+  const key = async (name, code, virtualKey) => {
+    await call('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code, windowsVirtualKeyCode: virtualKey });
+    await call('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code, windowsVirtualKeyCode: virtualKey });
+  };
   const navigate = async (route, heading) => {
     await call('Page.navigate', { url: base + '/panel/#' + route });
-    await wait(`document.querySelector('#page h1')?.textContent === ${JSON.stringify(heading)} && ![...document.querySelectorAll('#page [role=status]')].some(value => value.textContent.includes('正在读取'))`);
+    await wait(`document.querySelector('#page h1')?.textContent === ${JSON.stringify(heading)} && !document.querySelector('#page.is-loading')`);
     assert.equal(await evaluate(`!!document.querySelector('#page .error-state')`), false, '页面加载失败：' + route);
   };
   const screenshot = async name => {
+    await evaluate(`Promise.all(document.getAnimations().filter(value => value.effect?.getTiming().iterations !== Infinity).map(value => value.finished))`);
     const image = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
     await fs.writeFile(path.join(artifacts, name + '.png'), Buffer.from(image.data, 'base64'));
   };
@@ -107,6 +116,13 @@ try {
   await wait(`!document.querySelector('dialog') && document.querySelector('#page')?.textContent.includes('浏览器核对公开模型')`);
   await click('新增上游模型');
   await wait(`!!document.querySelector('dialog input[name=id]')`);
+  assert.equal(await evaluate(`document.querySelector('dialog button[type=submit]').form === document.querySelector('dialog form')`), true, '固定操作栏没有关联模型表单');
+  await evaluate(`document.querySelector('dialog [role=combobox][aria-label=接入协议]').focus()`);
+  await key('ArrowDown', 'ArrowDown', 40);
+  await wait(`!!document.querySelector('[role=listbox]')`);
+  await key('Escape', 'Escape', 27);
+  assert.equal(await evaluate(`!!document.querySelector('dialog') && !document.querySelector('[role=listbox]') && document.activeElement.getAttribute('role') === 'combobox'`), true, 'Esc 应只关闭选项并恢复焦点');
+  assert.equal(await evaluate(`(() => {const footer=document.querySelector('dialog .dialog-actions').getBoundingClientRect();return footer.top >= 0 && footer.bottom <= innerHeight;})()`), true, '模型编辑操作栏不在视口内');
   await evaluate(`(() => {
     const set=(name,value)=>{const input=document.querySelector('dialog [name='+name+']');input.value=value;};
     set('id','browser-model');set('display_name','浏览器上游模型');set('base_url','https://models.example.com/v1');
@@ -121,7 +137,7 @@ try {
     if(!button)throw new Error('新增模型缺少删除操作');button.click();
   })()`);
   await wait(`!!document.querySelector('dialog')`);
-  await evaluate(`document.querySelector('dialog .dialog-footer button.danger')?.click()`);
+  await evaluate(`document.querySelector('dialog .dialog-actions button.danger')?.click()`);
   await wait(`!document.querySelector('#page')?.textContent.includes('browser-model')`);
   await click('功能测试');
   await wait(`!!document.querySelector('dialog')`);
@@ -164,6 +180,23 @@ try {
     mobile.push({ route, loaded: true, horizontal_overflow: false });
     await screenshot(route + '-mobile');
   }
+  for (const width of [1920, 1280, 1024, 768]) {
+    await call('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await navigate('offerings', '模型与价格');
+    assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), true, '页面横向溢出：' + width);
+    await screenshot('offerings-' + width);
+  }
+  await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await navigate('settings', '设置');
+  await evaluate(`(() => {const control=document.querySelector('[role=combobox][aria-label=配色]');control.focus();control.click();})()`);
+  await key('End', 'End', 35);
+  await key('Enter', 'Enter', 13);
+  assert.equal(await evaluate('document.documentElement.dataset.colorScheme'), 'indigo', '键盘选择未保存配色');
+  assert.equal(await evaluate(`!document.querySelector('[role=listbox]') && document.activeElement.getAttribute('role') === 'combobox'`), true, '选择后未恢复焦点');
+  for (const scheme of ['graphite', 'grove', 'indigo']) for (const mode of ['light', 'dark']) {
+    await evaluate(`(() => {const scheme=document.querySelector('select[aria-label=配色]');scheme.value=${JSON.stringify(scheme)};scheme.dispatchEvent(new Event('change'));const mode=document.querySelector('select[aria-label=显示模式]');mode.value=${JSON.stringify(mode)};mode.dispatchEvent(new Event('change'));})()`);
+    await screenshot('settings-' + scheme + '-' + mode);
+  }
   await click('退出登录');
   await login('viewer');
   await navigate('offerings', '模型与价格');
@@ -182,6 +215,6 @@ try {
   chrome.kill('SIGTERM');
   if (chrome.exitCode === null) await Promise.race([once(chrome, 'exit'), pause(5000)]);
   if (chrome.exitCode === null) { chrome.kill('SIGKILL'); await once(chrome, 'exit').catch(() => {}); }
-  await fs.rm(profile, { recursive: true, force: true });
+  await fs.rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   if (temporaryArtifacts) await fs.rm(artifacts, { recursive: true, force: true });
 }

@@ -1,3 +1,5 @@
+import { enhanceSelect, closeSelect, installIndicator, markButtonBusy } from './controls.js';
+
 const root = document.querySelector('#app');
 const notices = document.querySelector('#notifications');
 const preferenceKey = 'byebyeocs-tiku-appearance';
@@ -8,7 +10,9 @@ function applyAppearance() {
   if (!['graphite', 'grove', 'indigo'].includes(appearance.palette)) appearance.palette = 'graphite';
   if (!['light', 'dark', 'system'].includes(appearance.mode)) appearance.mode = 'system';
   document.documentElement.dataset.palette = appearance.palette;
+  document.documentElement.dataset.colorScheme = appearance.palette;
   document.documentElement.dataset.mode = appearance.mode === 'system' ? (media.matches ? 'dark' : 'light') : appearance.mode;
+  document.documentElement.dataset.theme = document.documentElement.dataset.mode;
 }
 applyAppearance();
 media.addEventListener('change', applyAppearance);
@@ -27,7 +31,7 @@ const statusLabels = { answered: '已回答', cache_hit: '缓存命中', usage_i
 const errorLabels = { rate_limited: '上游请求受限', upstream_timeout: '上游响应超时', empty_answer: '模型返回空答案', model_disabled: '模型已停用', usage_incomplete: '用量不完整', request_cancelled: '请求已取消', model_unavailable: '模型暂不可用' };
 const actionLabels = { 'session.login': '登录', 'session.logout': '退出登录', 'model.state': '调整模型状态', 'model.test.request': '开始模型测试', 'model.test.result': '模型测试结束', 'offering.create': '发布公开条目', 'offering.update': '更新公开条目', 'offering.retire': '停用公开条目', 'offering.test.request': '开始公开条目测试', 'offering.test.result': '公开条目测试结束', 'cache.invalidate': '使缓存失效' };
 const pageState = new Map();
-const formatNumber = value => value == null ? '未返回' : Number(value).toLocaleString('zh-CN');
+const formatNumber = value => value == null ? '—' : Number(value).toLocaleString('zh-CN');
 const formatTime = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
 const shorten = value => value && value.length > 20 ? value.slice(0, 10) + '…' + value.slice(-6) : value || '—';
 function node(tag, className, text) {
@@ -53,7 +57,15 @@ function icon(path) {
 function button(label, action, className = '') {
   const element = node('button', className, label);
   element.type = 'button';
-  element.addEventListener('click', () => action(element));
+  element.addEventListener('click', async () => {
+    const menu = element.closest('details');
+    if (menu) menu.open = false;
+    const result = action(element);
+    if (result && typeof result.then === 'function') {
+      markButtonBusy(element, true);
+      try { await result; } finally { markButtonBusy(element, false); }
+    }
+  });
   return element;
 }
 function brand() {
@@ -66,6 +78,7 @@ function brand() {
 function notify(message, bad = false) {
   const element = node('div', bad ? 'notice bad' : 'notice', message);
   notices.append(element);
+  while (notices.childElementCount > 3) notices.firstElementChild.remove();
   setTimeout(() => element.remove(), 5000);
 }
 async function api(path, options = {}) {
@@ -84,10 +97,12 @@ async function api(path, options = {}) {
   return data;
 }
 function field(label, input) {
+  if (input.tagName === 'SELECT') { input.setAttribute('aria-label', label); input = enhanceSelect(input); }
   const wrapper = node('div', 'field');
   const title = node('label', '', label);
-  if (!input.id) input.id = 'field-' + crypto.randomUUID();
-  title.htmlFor = input.id;
+  const control = input.control || input;
+  if (!control.id) control.id = 'field-' + crypto.randomUUID();
+  title.htmlFor = control.id;
   wrapper.append(title, input);
   return wrapper;
 }
@@ -101,11 +116,14 @@ function input(type, name, autocomplete) {
 }
 function renderLogin() {
   epoch++;
+  pageViews.clear();
   currentDialog?.close();
+  closeSelect();
+  root.querySelector('.navigation')?.disposeIndicator?.();
   root.replaceChildren();
   const wrapper = node('main', 'login-wrap');
   const card = node('section', 'login');
-  card.append(brand(), node('h1', '', '题库维护'), node('p', 'muted', '登录后查看服务状态与管理模型。'));
+  card.append(brand(), node('h1', '', '题库维护'));
   const form = node('form');
   const username = input('text', 'username', 'username');
   const password = input('password', 'password', 'current-password');
@@ -131,6 +149,9 @@ function renderLogin() {
   root.append(wrapper);
 }
 function renderShell() {
+  pageViews.clear();
+  closeSelect();
+  root.querySelector('.navigation')?.disposeIndicator?.();
   root.replaceChildren();
   const shell = node('div', 'shell');
   const sidebar = node('aside', 'sidebar');
@@ -144,10 +165,10 @@ function renderShell() {
     link.prepend(icon(shape));
     nav.append(link);
   }
-  sidebar.append(nav, node('div', 'sidebar-footer', '独立题库服务'));
+  sidebar.append(nav);
+  installIndicator(nav, 'a[aria-current=page]');
   const workspace = node('div', 'workspace');
   const top = node('header', 'topbar');
-  top.append(node('span', 'small muted', '题库控制台'));
   const account = node('div', 'account');
   account.append(node('span', '', session.username), node('span', 'status', session.role === 'maintainer' ? '维护员' : '只读账号'));
   account.append(button('退出登录', async element => {
@@ -206,42 +227,64 @@ function select(label, choices, selected, onChange) {
     element.append(option);
   }
   element.addEventListener('change', () => onChange(element.value));
-  return element;
+  return enhanceSelect(element);
 }
-function openDialog(title) {
+function openDialog(title, drawer = false) {
   currentDialog?.close();
-  const dialog = node('dialog');
+  const opener = document.activeElement;
+  const dialog = node('dialog', drawer ? 'drawer' : '');
   currentDialog = dialog;
   const heading = node('div', 'dialog-heading');
   const titleNode = node('h2', '', title);
   titleNode.id = 'dialog-title';
   dialog.setAttribute('aria-labelledby', titleNode.id);
-  heading.append(titleNode, button('关闭', () => dialog.close()));
-  dialog.append(heading);
+  const close = button('', () => dialog.close(), 'icon-button');
+  close.setAttribute('aria-label', '关闭');
+  close.append(icon('M6 6l12 12 M18 6L6 18'));
+  heading.append(titleNode, close);
+  dialog.content = node('div', 'dialog-body');
+  dialog.footer = node('div', 'dialog-actions');
+  dialog.append(heading, dialog.content, dialog.footer);
   document.body.append(dialog);
-  dialog.addEventListener('close', () => { dialog.remove(); if (currentDialog === dialog) currentDialog = undefined; }, { once: true });
+  dialog.addEventListener('close', () => {
+    closeSelect();
+    dialog.remove();
+    if (currentDialog === dialog) currentDialog = undefined;
+    if (opener?.isConnected) opener.focus();
+  }, { once: true });
   dialog.showModal();
   return dialog;
 }
+function formSection(title, ...children) {
+  const section = node('fieldset', 'form-section');
+  section.append(node('legend', '', title), ...children);
+  return section;
+}
+function formActions(dialog, form, submit) {
+  const formId = 'form-' + crypto.randomUUID();
+  form.setAttribute('id', formId);
+  submit.setAttribute('form', formId);
+  dialog.footer.append(button('取消', () => dialog.close()), submit);
+}
 async function showRequest(id) {
-  const dialog = openDialog('查询详情');
+  const dialog = openDialog('查询详情', true);
   const state = node('p', 'muted', '正在读取…');
-  dialog.append(state);
+  dialog.content.append(state);
   try {
     const value = await api('/requests/' + encodeURIComponent(id));
     state.remove();
-    dialog.append(detailGrid([
+    dialog.content.append(detailGrid([
       ['请求编号', value.id], ['模型', value.model_id || '未记录'], ['状态', statusLabels[value.status] || value.status],
       ['查询模式', value.mode === 'cache_first' ? '优先使用缓存' : value.mode === 'always_llm' ? '每次使用模型' : '未记录'],
       ['缓存范围', value.cache_scope === 'shared' ? '共享' : value.cache_scope === 'user' ? '用户隔离' : '未记录'],
       ['输入 / 输出 token', formatNumber(value.usage?.input_tokens) + ' / ' + formatNumber(value.usage?.output_tokens)],
       ['用量完整性', value.usage?.complete === true ? '完整' : '未完整返回'], ['请求时间', formatTime(value.created_at)],
     ]));
-    if (value.error_code) dialog.append(node('p', 'form-error', errorLabels[value.error_code] || '请求未成功，请核对服务状态'));
-    dialog.append(node('h3', '', '答案'), node('div', 'detail-text', value.answer || '暂无可用答案内容'));
+    if (value.error_code) dialog.content.append(node('p', 'form-error', errorLabels[value.error_code] || '请求未成功，请核对服务状态'));
+    dialog.content.append(node('h3', '', '答案'), node('div', 'detail-text', value.answer || '暂无可用答案内容'));
     if (value.calls?.length) {
-      dialog.append(node('h3', '', '模型调用'));
-      dialog.append(table(['用途', '输入', '输出', '用量'], value.calls.map(call => [call.slot === 'caption' ? '图片转述' : '回答', formatNumber(call.input_tokens), formatNumber(call.output_tokens), call.usage_complete ? '完整' : '不完整'])));
+      dialog.content.append(node('h3', '', '模型调用'));
+      dialog.content.append(table(['用途', '输入', '输出', '用量'], value.calls.map(call => [call.slot === 'caption' ? '图片转述' : '回答', formatNumber(call.input_tokens), formatNumber(call.output_tokens), call.usage_complete ? '完整' : '不完整'])));
     }
   } catch (error) { state.textContent = error.message; state.className = 'form-error'; }
 }
@@ -274,10 +317,10 @@ async function renderOverview(page) {
 }
 function modelTest(model, functional) {
   const dialog = openDialog(functional ? '功能测试' : '连通测试');
-  dialog.append(node('p', '', model.display_name));
+  dialog.content.append(node('p', '', model.display_name));
   let checkbox;
   if (functional) {
-    dialog.append(node('p', 'muted', '功能测试会请求模型生成内容，并产生模型用量。'));
+    dialog.content.append(node('p', 'muted', '功能测试会请求模型生成内容，并产生模型用量。'));
     const check = node('div', 'check-row');
     checkbox = input('checkbox', 'confirm_cost');
     checkbox.id = 'confirm-cost';
@@ -285,10 +328,10 @@ function modelTest(model, functional) {
     const label = node('label', '', '我已了解本次测试会产生用量');
     label.htmlFor = checkbox.id;
     check.append(checkbox, label);
-    dialog.append(check);
+    dialog.content.append(check);
   }
   const result = node('p', 'muted');
-  const footer = node('div', 'dialog-footer');
+  result.setAttribute('role', 'status');
   const submit = button('开始测试', async element => {
     if (functional && !checkbox.checked) return;
     element.disabled = true;
@@ -302,8 +345,8 @@ function modelTest(model, functional) {
     } catch (error) { result.textContent = error.message; element.textContent = '本次测试未完成'; }
   }, 'primary');
   if (functional) { submit.disabled = true; checkbox.addEventListener('change', () => { submit.disabled = !checkbox.checked; }); }
-  footer.append(submit);
-  dialog.append(result, footer);
+  dialog.content.append(result);
+  dialog.footer.append(submit);
 }
 const protocolLabels = { 'openai-chat': 'OpenAI 兼容', 'anthropic-messages': 'Anthropic', 'gemini-generate-content': 'Gemini', 'ollama-chat': 'Ollama' };
 const capabilityLabels = { text: '文本', vision: '图片', tool_call: '工具调用' };
@@ -343,19 +386,22 @@ function offeringCard(model, offering, settings, orphan = false) {
   if (offering) tags.append(node('span', 'status' + (offering.health === 'unavailable' ? ' bad' : ' good'), offering.health === 'unavailable' ? '模型不可用' : '模型可用'));
   card.append(tags);
   if (offering) {
-    card.append(detailGrid([
-      ['公开编号', offering.public_id],
-      ['输入价格', formatTokenPrice(offering.pricing?.input_micros_per_million_tokens ?? null)],
-      ['输出价格', formatTokenPrice(offering.pricing?.output_micros_per_million_tokens ?? null)],
-      ['价格版本', offering.price_version || '未定价'],
-      ['缓存策略', offering.cache_policy.allow ? (offering.cache_policy.scope === 'shared' ? '共享缓存' : '用户隔离') + ' · ' + offering.cache_policy.ttl_days + ' 天' : '已关闭'],
-      ['最近测试', model.last_test ? (model.last_test.status === 'ok' ? '通过 · ' : '失败 · ') + formatTime(model.last_test.created_at) : '尚未测试'],
-    ]));
+    const summary = node('div', 'model-pricing');
+    for (const [label, value] of [
+      ['输入', formatTokenPrice(offering.pricing?.input_micros_per_million_tokens ?? null)],
+      ['输出', formatTokenPrice(offering.pricing?.output_micros_per_million_tokens ?? null)],
+      ['缓存', offering.cache_policy.allow ? (offering.cache_policy.scope === 'shared' ? '共享缓存' : '用户隔离') + ' · ' + offering.cache_policy.ttl_days + ' 天' : '已关闭'],
+    ]) {
+      const item = node('span');
+      item.append(node('span', 'muted', label + ' '), document.createTextNode(value));
+      summary.append(item);
+    }
+    card.append(summary);
   } else {
     card.append(node('p', 'muted', '尚未发布公开条目；用户不能选择此模型。'));
   }
   if (orphan) {
-    card.append(node('p', 'muted', '题库配置中已没有该模型引用；条目不会对用户提供。恢复模型配置后可继续编辑。'));
+    card.append(node('p', 'muted', '模型配置已移除，当前条目不可用。'));
     if (session.role === 'maintainer' && offering) {
       card.append(button('停用条目', async element => {
         element.disabled = true;
@@ -370,26 +416,40 @@ function offeringCard(model, offering, settings, orphan = false) {
     const actions = node('div', 'actions model-actions');
     actions.append(button(offering ? '编辑' : '发布', () => offeringDialog(offering, model, settings)));
     actions.append(button('编辑配置', () => upstreamModelDialog(model)));
-    actions.append(button('连通测试', () => modelTest(model, false)), button('功能测试', () => modelTest(model, true)));
+    const menu = node('details', 'row-menu');
+    menu.append(node('summary', '', '更多操作'));
+    const options = node('div');
+    options.append(button('模型详情', () => modelDetailsDialog(model, offering)), button('连通测试', () => modelTest(model, false)), button('功能测试', () => modelTest(model, true)));
     const toggle = button(model.enabled ? '停用' : '启用', async element => {
       element.disabled = true;
       try { await api('/models/' + encodeURIComponent(model.id), { method: 'PATCH', body: JSON.stringify({ enabled: !model.enabled }) }); notify('模型状态已更新'); loadPage(); } catch (error) { notify(error.message, true); element.disabled = false; }
     });
     toggle.disabled = model.locked;
-    actions.append(toggle, button('删除模型', () => deleteModelDialog(model)));
+    options.append(toggle, button('删除模型', () => deleteModelDialog(model), 'danger'));
+    menu.append(options);
+    actions.append(menu);
     card.append(actions);
+  } else {
+    card.append(button('模型详情', () => modelDetailsDialog(model, offering)));
   }
   return card;
+}
+function modelDetailsDialog(model, offering) {
+  const dialog = openDialog('模型详情', true);
+  dialog.content.append(detailGrid([
+    ['模型名称', offering?.display_name || model.display_name],
+    ['模型标识', model.id],
+    ['接入协议', protocolLabels[model.protocol] || model.protocol || '配置缺失'],
+    ['公开编号', offering?.public_id || '未发布'],
+    ['价格版本', offering?.pricing?.version || '未定价'],
+    ['输入价格', formatTokenPrice(offering?.pricing?.input_micros_per_million_tokens)],
+    ['输出价格', formatTokenPrice(offering?.pricing?.output_micros_per_million_tokens)],
+    ['最近测试', model.last_test ? formatTime(model.last_test.created_at) : '尚未测试'],
+  ]));
 }
 async function renderOfferings(page) {
   const [offeringData, modelData, settings] = await Promise.all([api('/offerings'), api('/models'), api('/settings')]);
   const models = modelData.items;
-  const setup = node('section', 'card');
-  const setupHeader = node('div', 'card-header');
-  setupHeader.append(node('h2', '', '上游模型'));
-  if (session.role === 'maintainer') setupHeader.append(button('新增上游模型', () => upstreamModelDialog(null), 'primary'));
-  setup.append(setupHeader, node('p', 'muted', '在这里配置上游模型地址、模型名和密钥；保存后立即生效。密钥只写入题库服务私密文件，不会回显。'));
-  page.append(setup);
   if (!models.length) {
     const empty = node('div', 'card empty');
     empty.append(node('p', '', '尚未配置上游模型。'), session.role === 'maintainer' ? button('新增上游模型', () => upstreamModelDialog(null), 'primary') : node('span', '', '请联系维护员配置上游模型。'));
@@ -413,11 +473,10 @@ async function renderOfferings(page) {
       enabled: false, locked: true, protocol: '', last_test: null }, offering, settings, true));
   }
   page.append(grid);
-  page.append(node('p', 'small muted', '价格与缓存策略保存后立即对主平台生效；已完成查询继续使用当时冻结的价格与策略。已发布条目不提供删除，只能下架。'));
 }
 function upstreamModelDialog(model) {
   const isNew = !model;
-  const dialog = openDialog(isNew ? '新增上游模型' : '编辑上游模型');
+  const dialog = openDialog(isNew ? '新增上游模型' : '编辑上游模型', true);
   const form = node('form');
   const id = input('text', 'id');
   id.required = isNew;
@@ -473,24 +532,20 @@ function upstreamModelDialog(model) {
   const submit = node('button', 'primary', isNew ? '添加模型' : '保存模型');
   submit.type = 'submit';
   form.append(
-    field('模型标识', id),
-    field('显示名称', displayName),
-    field('接入协议', protocol),
-    field('供应商（可选）', vendor),
-    field('接口地址', baseURL),
-    field('上游模型名', upstreamModel),
-    field('API 密钥', apiKey),
-    makeCheck(vision, '支持图片输入'),
-    makeCheck(toolCall, '支持工具调用'),
-    makeCheck(reasoning, '支持推理内容'),
-    field('上下文长度', context),
-    field('单次最大输出 token', maxOutput),
-    makeCheck(enabled, '配置允许启用'),
-    makeCheck(caption, '作为图片转述模型'),
-    node('p', 'small muted', '接口地址必须使用 HTTPS；本地测试的 http 回环地址需要服务配置显式允许。密钥只保存在题库服务的私密文件中。面板的“停用/启用”是独立的临时开关。'),
+    formSection('基本信息',
+      field('模型标识', id), field('显示名称', displayName), field('供应商（可选）', vendor)),
+    formSection('上游连接',
+      field('接入协议', protocol), field('接口地址', baseURL),
+      field('上游模型名', upstreamModel), field('API 密钥', apiKey),
+      node('p', 'field-hint', '使用 HTTPS 接口地址。密钥保存后不会回显，编辑时留空保留原密钥。')),
+    formSection('模型能力',
+      makeCheck(vision, '支持图片输入'), makeCheck(toolCall, '支持工具调用'),
+      makeCheck(reasoning, '支持推理内容'), field('上下文长度', context),
+      field('单次最大输出 token', maxOutput), makeCheck(enabled, '配置允许启用'),
+      makeCheck(caption, '作为图片转述模型')),
     error,
-    submit,
   );
+  formActions(dialog, form, submit);
   form.addEventListener('submit', async event => {
     event.preventDefault();
     if (submit.disabled) return;
@@ -528,14 +583,14 @@ function upstreamModelDialog(model) {
       submit.disabled = false;
     }
   });
-  dialog.append(form);
+  dialog.content.append(form);
 }
 
 function deleteModelDialog(model) {
   const dialog = openDialog('删除上游模型');
   const error = node('p', 'form-error');
-  dialog.append(node('p', '', '删除 ' + model.display_name + '（' + model.id + '）后，该模型不能再用于作答。仍有公开条目引用时会被拒绝。'), error);
-  const footer = node('div', 'dialog-footer');
+  error.setAttribute('role', 'alert');
+  dialog.content.append(node('p', '', '删除 ' + model.display_name + '（' + model.id + '）后，该模型不能再用于作答。仍有公开条目引用时会被拒绝。'), error);
   const submit = button('删除模型', async element => {
     element.disabled = true;
     try {
@@ -548,12 +603,11 @@ function deleteModelDialog(model) {
       element.disabled = false;
     }
   }, 'danger');
-  footer.append(button('取消', () => dialog.close()), submit);
-  dialog.append(footer);
+  dialog.footer.append(button('取消', () => dialog.close()), submit);
 }
 
 function offeringDialog(offering, model, settings) {
-  const dialog = openDialog(offering ? '编辑公开模型' : '发布公开模型');
+  const dialog = openDialog(offering ? '编辑公开模型' : '发布公开模型', true);
   const form = node('form');
   const name = input('text', 'display_name');
   name.value = offering?.display_name ?? model.display_name;
@@ -613,23 +667,19 @@ function offeringDialog(offering, model, settings) {
   const submit = node('button', 'primary', offering ? '保存' : '发布');
   submit.type = 'submit';
   form.append(
-    field('公开名称', name),
-    field('说明', description),
-    field('输入价格（元 / 百万 token）', inputPrice),
-    field('输出价格（元 / 百万 token）', outputPrice),
-    field('价格版本', priceVersion),
-    field('价格取整方式', rounding),
-    makeCheck(allowCache, '启用精确缓存'),
-    field('缓存范围', scope),
-    field('缓存期限（天）', ttl),
-    ...(model.capabilities.includes('vision') ? [makeCheck(vision, '支持图片题')] : []),
-    makeCheck(enabled, '对用户可见'),
-    makeCheck(isDefault, '设为默认模型'),
-    field('排序值', sortOrder),
-    node('p', 'small muted', '输入与输出价格都留空表示暂未定价；已定价条目必须填写价格版本，同一版本不能使用不同费率。'),
+    formSection('公开信息', field('公开名称', name), field('说明', description),
+      ...(model.capabilities.includes('vision') ? [makeCheck(vision, '支持图片题')] : [])),
+    formSection('Token 价格', field('输入价格（元 / 百万 token）', inputPrice),
+      field('输出价格（元 / 百万 token）', outputPrice), field('价格版本', priceVersion),
+      field('价格取整方式', rounding),
+      node('p', 'field-hint', '输入与输出价格都留空表示未定价。价格调整需填写新的价格版本。')),
+    formSection('精确缓存', makeCheck(allowCache, '启用精确缓存'),
+      field('缓存范围', scope), field('缓存期限（天）', ttl)),
+    formSection('发布设置', makeCheck(enabled, '对用户可见'),
+      makeCheck(isDefault, '设为默认模型'), field('排序值', sortOrder)),
     error,
-    submit,
   );
+  formActions(dialog, form, submit);
   enabled.addEventListener('change', () => { if (!enabled.checked) isDefault.checked = false; });
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -679,13 +729,13 @@ function offeringDialog(offering, model, settings) {
       submit.disabled = false;
     }
   });
-  dialog.append(node('p', 'muted', '模型引用：' + model.id + ' · ' + (protocolLabels[model.protocol] || model.protocol)), form);
+  dialog.content.append(node('p', 'muted', '模型引用：' + model.id + ' · ' + (protocolLabels[model.protocol] || model.protocol)), form);
 }
 function cacheDialog(value) {
-  const dialog = openDialog('缓存详情');
-  dialog.append(detailGrid([['缓存编号', value.id], ['模型', value.model_id], ['范围', value.scope === 'shared' ? '共享' : '用户隔离'], ['状态', statusLabels[value.status]], ['保存时间', formatTime(value.created_at)], ['到期时间', formatTime(value.expires_at)], ['来源请求', value.source_request_id]]));
-  dialog.append(node('h3', '', '题目'), node('p', 'detail-text', value.question_title), node('h3', '', '答案'), node('p', 'detail-text', value.answer));
-  if (value.invalidation_reason) dialog.append(node('p', 'muted', '失效原因：' + value.invalidation_reason));
+  const dialog = openDialog('缓存详情', true);
+  dialog.content.append(detailGrid([['缓存编号', value.id], ['模型', value.model_id], ['范围', value.scope === 'shared' ? '共享' : '用户隔离'], ['状态', statusLabels[value.status]], ['保存时间', formatTime(value.created_at)], ['到期时间', formatTime(value.expires_at)], ['来源请求', value.source_request_id]]));
+  dialog.content.append(node('h3', '', '题目'), node('p', 'detail-text', value.question_title), node('h3', '', '答案'), node('p', 'detail-text', value.answer));
+  if (value.invalidation_reason) dialog.content.append(node('p', 'muted', '失效原因：' + value.invalidation_reason));
   if (session.role !== 'maintainer' || value.status !== 'active') return;
   const form = node('form');
   const reason = node('textarea');
@@ -695,14 +745,16 @@ function cacheDialog(value) {
   const error = node('p', 'form-error');
   const submit = node('button', 'danger', '使此缓存失效');
   submit.type = 'submit';
-  form.append(field('失效原因', reason), error, submit);
+  error.setAttribute('role', 'alert');
+  form.append(field('失效原因', reason), error);
+  formActions(dialog, form, submit);
   form.addEventListener('submit', async event => {
     event.preventDefault();
     if (submit.disabled) return;
     submit.disabled = true;
     try { await api('/cache/' + encodeURIComponent(value.id) + '/invalidations', { method: 'POST', body: JSON.stringify({ reason: reason.value }) }); dialog.close(); notify('缓存已失效'); loadPage(); } catch (failure) { error.textContent = failure.message; submit.disabled = false; }
   });
-  dialog.append(form);
+  dialog.content.append(form);
 }
 async function renderList(page, route) {
   if (!pageState.has(route)) pageState.set(route, { cursor: '', previous: [], model: '', status: '' });
@@ -757,27 +809,55 @@ async function renderSettings(page) {
   ]));
   page.append(appearanceCard, serviceCard);
 }
+const pageViews = new Map();
+function loadingSurface() {
+  const surface = node('div', 'table-wrap');
+  surface.setAttribute('role', 'status');
+  surface.setAttribute('aria-label', '正在加载');
+  for (let row = 0; row < 6; row++) {
+    const line = node('div', 'skeleton-row');
+    for (let column = 0; column < 4; column++) line.append(node('div', 'skeleton'));
+    surface.append(line);
+  }
+  return surface;
+}
 async function loadPage() {
   if (!session) return;
   const generation = ++epoch;
   currentDialog?.close();
+  closeSelect();
   let route = location.hash.slice(1) || 'overview';
   if (!navigation.some(value => value[0] === route)) route = 'overview';
   for (const element of document.querySelectorAll('[data-route]')) {
     if (element.dataset.route === route) element.setAttribute('aria-current', 'page'); else element.removeAttribute('aria-current');
   }
+  document.querySelector('.navigation')?.updateIndicator?.();
   const main = document.querySelector('#page');
   if (!main) return;
-  main.replaceChildren();
-  const heading = node('div', 'page-heading');
-  const title = node('div');
-  const subtitles = { overview: '查看查询、模型用量与缓存状态。', offerings: '维护公开模型、token 价格与精确缓存策略，并测试模型可用性。', requests: '查看每次查询的结果、缓存来源与模型用量。', cache: '查看精确缓存及其有效期，处理错误答案。', audit: '查看维护账号的操作记录。', settings: '管理当前设备外观，查看服务设置。' };
-  title.append(node('h1', '', navigation.find(value => value[0] === route)[1]), node('p', '', subtitles[route]));
-  heading.append(title, button('刷新', () => loadPage()));
-  main.append(heading);
-  const loading = node('div', 'card empty', '正在读取…');
-  loading.setAttribute('role', 'status');
-  main.append(loading);
+  const changed = main.dataset.page !== route;
+  if (changed && pageViews.has(main.dataset.page)) pageViews.get(main.dataset.page).scroll = window.scrollY;
+  let view = pageViews.get(route);
+  if (!view) {
+    const heading = node('div', 'page-heading');
+    const actions = node('div', 'actions');
+    if (route === 'offerings' && session.role === 'maintainer') actions.append(button('新增上游模型', () => upstreamModelDialog(null), 'primary'));
+    actions.append(button('刷新', () => loadPage()));
+    heading.append(node('h1', '', navigation.find(value => value[0] === route)[1]), actions);
+    const body = node('div', 'page-body');
+    body.append(loadingSurface());
+    view = { heading, body, scroll: 0, loaded: false };
+    pageViews.set(route, view);
+  }
+  if (changed) {
+    main.dataset.page = route;
+    main.replaceChildren(node('div', 'page-progress'), view.heading, view.body);
+    view.body.classList.add('entering');
+    window.scrollTo(0, view.scroll);
+  }
+  main.classList.add('is-loading');
+  view.body.setAttribute('aria-busy', 'true');
+  const focused = document.activeElement;
+  const focusLabel = view.body.contains(focused) ? focused.getAttribute('aria-label') : null;
   const content = node('div');
   try {
     if (route === 'overview') await renderOverview(content);
@@ -785,12 +865,23 @@ async function loadPage() {
     else if (route === 'settings') await renderSettings(content);
     else await renderList(content, route);
     if (generation !== epoch) return;
-    loading.remove();
-    main.append(content);
+    view.body.replaceChildren(...content.childNodes);
+    view.loaded = true;
+    if (changed) window.scrollTo(0, view.scroll);
+    if (focusLabel && !focused.isConnected && document.activeElement === document.body) {
+      [...view.body.querySelectorAll('button[aria-label]')].find(item => item.getAttribute('aria-label') === focusLabel)?.focus({ preventScroll: true });
+    }
   } catch (error) {
     if (generation !== epoch) return;
-    loading.remove();
-    main.append(node('div', 'error-state', error.message));
+    const failure = node('div', 'error-state', error.message);
+    failure.setAttribute('role', 'alert');
+    failure.append(button('重试', () => loadPage()));
+    if (view.loaded) view.body.prepend(failure); else view.body.replaceChildren(failure);
+  } finally {
+    if (generation === epoch) {
+      main.classList.remove('is-loading');
+      view.body.removeAttribute('aria-busy');
+    }
   }
 }
 window.addEventListener('hashchange', loadPage);
