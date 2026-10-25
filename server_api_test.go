@@ -140,7 +140,9 @@ func TestRecordListIsBoundedAndDetailsStayComplete(t *testing.T) {
 		lastID = id
 	}
 	recorder := httptest.NewRecorder()
-	s.handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/api/records?page=1&limit=50", nil))
+	localRequest := httptest.NewRequest("GET", "/api/records?page=1&limit=50", nil)
+	localRequest.Host = "127.0.0.1"
+	s.handler().ServeHTTP(recorder, localRequest)
 	if recorder.Code != 200 || recorder.Body.Len() > 25000 {
 		t.Fatalf("摘要响应过大或失败: 状态=%d 字节=%d", recorder.Code, recorder.Body.Len())
 	}

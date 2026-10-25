@@ -27,6 +27,11 @@ type Budget struct {
 	MaxOutputTokens int `json:"max_output_tokens"`
 }
 
+type CachePolicy struct {
+	Allow   bool `json:"allow"`
+	TTLDays int  `json:"ttl_days"`
+}
+
 type Request struct {
 	RequestID       string        `json:"request_id"`
 	ModelOfferingID string        `json:"model_offering_id"`
@@ -35,6 +40,7 @@ type Request struct {
 	CacheScopeKey   string        `json:"cache_scope_key"`
 	Question        QuestionInput `json:"question"`
 	Budget          Budget        `json:"budget"`
+	CachePolicy     *CachePolicy  `json:"cache_policy,omitempty"`
 }
 
 type ModelInfo struct {
@@ -304,6 +310,14 @@ func errorFromCode(code string) error {
 }
 
 func (s *Service) validate(req Request) (*config.Model, normalize.Question, string, string, error) {
+	if req.CachePolicy != nil {
+		if req.CachePolicy.TTLDays < 1 || req.CachePolicy.TTLDays > s.cfg.Cache.MaxTTLDays {
+			return nil, normalize.Question{}, "", "", newError("invalid_cache_policy", "缓存期限超过允许范围", 422, false)
+		}
+		if !req.CachePolicy.Allow && req.Mode == "cache_first" {
+			return nil, normalize.Question{}, "", "", newError("cache_not_allowed", "本次策略未允许答案缓存", 422, false)
+		}
+	}
 	if req.Mode != "cache_first" && req.Mode != "always_llm" {
 		return nil, normalize.Question{}, "", "", newError("invalid_mode", "作答方式无效", 422, false)
 	}
@@ -353,17 +367,25 @@ func (s *Service) validate(req Request) (*config.Model, normalize.Question, stri
 	scopeHash := normalize.ScopeKeyHash(req.CacheScope, req.CacheScopeKey)
 	key := normalize.CacheKey(model.ID, s.cfg.PromptVersion, s.cfg.NormalizationVersion,
 		req.CacheScope, scopeHash, req.Question.Title, req.Question.Options, prepared.Type, prepared.Images)
+	if req.CachePolicy != nil {
+		// 不同保留期分开缓存；新策略不会复用旧策略留下的长有效期条目。
+		key = store.Hash(fmt.Sprintf("%s:ttl:%d", key, req.CachePolicy.TTLDays))
+	}
 	return model, prepared, key, scopeHash, nil
 }
 
 func (s *Service) execute(ctx context.Context, req Request, model *config.Model, prepared normalize.Question, cacheKey, scopeHash, idemKey string) (*Response, error) {
 	start := s.now()
-	if req.Mode == "cache_first" {
+	allowCache, ttlDays := true, s.cfg.Cache.TTLDays
+	if req.CachePolicy != nil {
+		allowCache, ttlDays = req.CachePolicy.Allow, req.CachePolicy.TTLDays
+	}
+	if req.Mode == "cache_first" && allowCache {
 		entry, err := s.store.LookupCache(ctx, cacheKey, start)
 		if err != nil {
 			return nil, newError("internal_error", "无法读取精确缓存", 500, false)
 		}
-		if entry != nil {
+		if entry != nil && entry.CreatedAt.Add(time.Duration(ttlDays)*24*time.Hour).After(start) {
 			zero := int64(0)
 			entryCreated := entry.CreatedAt.UTC()
 			resp := &Response{
@@ -410,8 +432,8 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 	persistCtx, cancelPersist := persistContext(ctx)
 	defer cancelPersist()
 	s.recordCalls(persistCtx, req.RequestID, usage.Calls)
-	if usage.Complete && strings.TrimSpace(answer) != "" {
-		expires := s.now().Add(time.Duration(s.cfg.Cache.TTLDays) * 24 * time.Hour)
+	if allowCache && usage.Complete && strings.TrimSpace(answer) != "" {
+		expires := s.now().Add(time.Duration(ttlDays) * 24 * time.Hour)
 		// 缓存只是优化：写入失败不能让已成功的模型作答失败或丢失幂等结果。
 		_, _, _ = s.store.PutCache(persistCtx, store.CacheEntry{
 			ID: store.NewUUID(), CacheKey: cacheKey, OfferingID: model.ID,
@@ -420,6 +442,7 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 			QuestionTitle: prepared.TitleText, QuestionOptions: normalize.CanonicalOptions(prepared.Options),
 			QuestionType: prepared.Type, ImagesDigest: normalize.ImagesDigest(prepared.Images),
 			Answer: answer, SourceRequestID: req.RequestID, ExpiresAt: expires,
+			MaxAge: time.Duration(ttlDays) * 24 * time.Hour,
 		})
 	}
 	s.recordQuery(persistCtx, req, model.ID, scopeHash, idemKey, resp, "", time.Time{})

@@ -18,6 +18,8 @@ type ServiceConfig = {
   protocol: string;
   base_url: string;
   api_key: string;
+  api_key_configured?: boolean;
+  clear_api_key?: boolean;
   vendor?: string;
 };
 
@@ -148,7 +150,7 @@ function ServicesPanel({ data, onSaved }: { data: SettingsData; onSaved: () => v
   const startEdit = (id: string, service: ServiceConfig) => {
     setCreating(false);
     setEditing(id);
-    setDraft({ ...service });
+    setDraft({ ...service, api_key: "", clear_api_key: false });
   };
 
   const cancel = () => {
@@ -325,7 +327,8 @@ function ServiceForm({
       </div>
       <div className="grid gap-2">
         <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">API Key</Label>
-        <Input type="password" value={draft.api_key} onChange={e => setDraft({ ...draft, api_key: e.target.value })} placeholder="sk-..." className="font-mono" />
+        <Input type="password" value={draft.api_key} onChange={e => setDraft({ ...draft, api_key: e.target.value, clear_api_key: false })} placeholder={draft.api_key_configured ? "已配置；地址不变时留空保留" : "请输入密钥"} className="font-mono" />
+        {!askID && draft.api_key_configured && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={draft.clear_api_key === true} onChange={e => setDraft({ ...draft, clear_api_key: e.target.checked, api_key: "" })} />移除已保存的密钥</label>}
       </div>
       <div className="grid gap-2">
         <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">厂商标识（可选）</Label>

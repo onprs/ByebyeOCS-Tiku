@@ -215,15 +215,15 @@ func validateModel(model ModelConfig, services map[string]ServiceConfig) error {
 
 // createService 只新增服务，标识重复时拒绝覆盖。
 func (c *Config) createService(id string, service ServiceConfig) error {
-	return c.setService(id, service, true)
+	return c.setService(id, service, true, false)
 }
 
 // updateService 新增或更新一个服务条目。
 func (c *Config) updateService(id string, service ServiceConfig) error {
-	return c.setService(id, service, false)
+	return c.setService(id, service, false, false)
 }
 
-func (c *Config) setService(id string, service ServiceConfig, createOnly bool) error {
+func (c *Config) setService(id string, service ServiceConfig, createOnly, clearKey bool) error {
 	if !serviceIDPattern.MatchString(id) {
 		return errors.New("服务标识只能包含字母、数字、点、下划线和连字符")
 	}
@@ -234,6 +234,12 @@ func (c *Config) setService(id string, service ServiceConfig, createOnly bool) e
 	defer c.mu.Unlock()
 	if _, exists := c.data.Services[id]; createOnly && exists {
 		return errServiceExists
+	}
+	previous, exists := c.data.Services[id]
+	if clearKey {
+		service.APIKey = ""
+	} else if exists && !createOnly && service.APIKey == "" && service.BaseURL == previous.BaseURL && service.Protocol == previous.Protocol {
+		service.APIKey = previous.APIKey
 	}
 	old := c.data
 	c.data.Services = maps.Clone(old.Services)

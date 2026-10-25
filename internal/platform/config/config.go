@@ -71,6 +71,18 @@ type Model struct {
 	MaxOutputTokens int    `json:"max_output_tokens"`
 }
 
+type PanelUser struct {
+	Username         string `json:"username"`
+	PasswordHashFile string `json:"password_hash_file"`
+	Role             string `json:"role"`
+}
+
+type Panel struct {
+	Enabled bool        `json:"enabled"`
+	Origin  string      `json:"origin"`
+	Users   []PanelUser `json:"users"`
+}
+
 type Config struct {
 	Listen                 string  `json:"listen"`
 	DatabaseMaxConnections int32   `json:"database_max_connections"`
@@ -85,6 +97,7 @@ type Config struct {
 	Limits                 Limits  `json:"limits"`
 	Cache                  Cache   `json:"cache"`
 	Models                 []Model `json:"models"`
+	Panel                  Panel   `json:"panel"`
 }
 
 func applyDefaults(c *Config) {
@@ -161,6 +174,11 @@ func Load(path string) (*Config, error) {
 			c.Models[index].APIKeyFile = filepath.Join(directory, value)
 		}
 	}
+	for index := range c.Panel.Users {
+		if value := c.Panel.Users[index].PasswordHashFile; value != "" && !filepath.IsAbs(value) {
+			c.Panel.Users[index].PasswordHashFile = filepath.Join(directory, value)
+		}
+	}
 	applyDefaults(&c)
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -207,6 +225,38 @@ func (c *Config) Validate() error {
 	}
 	if c.Cache.TTLDays < 1 || c.Cache.TTLDays > c.Cache.MaxTTLDays || c.Cache.MaxTTLDays > 365 {
 		return errors.New("cache.ttl_days 必须不高于 cache.max_ttl_days，且上限不超过 365 天")
+	}
+	if c.Panel.Enabled {
+		origin, err := url.Parse(c.Panel.Origin)
+		if err != nil || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || origin.Path != "" || (origin.Scheme != "http" && origin.Scheme != "https") {
+			return errors.New("panel.origin 必须是无路径的完整来源地址")
+		}
+		if origin.Scheme == "http" {
+			ip := net.ParseIP(origin.Hostname())
+			if origin.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+				return errors.New("维护面板的非回环入口必须使用 HTTPS")
+			}
+		}
+		if len(c.Panel.Users) < 1 || len(c.Panel.Users) > 16 {
+			return errors.New("维护面板需要配置1到16个独立账号")
+		}
+		seenUsers := make(map[string]bool)
+		maintainers := 0
+		for _, user := range c.Panel.Users {
+			if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`).MatchString(user.Username) || seenUsers[user.Username] || user.PasswordHashFile == "" {
+				return errors.New("维护账号名称重复、无效或缺少密码哈希文件")
+			}
+			seenUsers[user.Username] = true
+			if user.Role != "maintainer" && user.Role != "viewer" {
+				return errors.New("维护账号角色必须为 maintainer 或 viewer")
+			}
+			if user.Role == "maintainer" {
+				maintainers++
+			}
+		}
+		if maintainers == 0 {
+			return errors.New("维护面板至少需要一个维护员账号")
+		}
 	}
 	seen := make(map[string]bool, len(c.Models))
 	for i := range c.Models {

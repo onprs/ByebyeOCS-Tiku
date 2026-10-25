@@ -24,5 +24,10 @@
     "max_ttl_days": 30,
     "shared_enabled": false
   },
-  "models": []
+  "models": [],
+  "panel": {
+    "enabled": false,
+    "origin": "",
+    "users": []
+  }
 }

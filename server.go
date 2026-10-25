@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"path/filepath"
 	"sort"
@@ -91,7 +93,36 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/dashboard", s.dashboard)
 	mux.Handle("GET /images/", http.StripPrefix("/images/", http.FileServer(http.Dir(s.imageDir))))
 	mux.HandleFunc("GET /", s.frontend)
-	return mux
+	return legacyLocalOnly(mux)
+}
+
+// 兼容网页仅服务本机维护；v1 搜索接口保留原有客户端接入方式。
+func legacyLocalOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/search" {
+			host, _, err := net.SplitHostPort(r.Host)
+			if err != nil {
+				host = strings.Trim(r.Host, "[]")
+			}
+			ip := net.ParseIP(host)
+			if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+				jsonError(w, 403, errors.New("兼容管理接口仅限本机使用"))
+				return
+			}
+			if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+				jsonError(w, 403, errors.New("请求来源无效"))
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" {
+				parsed, err := url.Parse(origin)
+				if err != nil || parsed.Host != r.Host || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
+					jsonError(w, 403, errors.New("请求来源无效"))
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
@@ -150,24 +181,34 @@ type vendorInfo struct {
 	Models int    `json:"models"`
 }
 
+type maskedServiceView struct {
+	ServiceConfig
+	APIKeyConfigured bool `json:"api_key_configured"`
+}
+
 type settingsView struct {
-	Services   map[string]ServiceConfig `json:"services"`
-	Templates  []ServiceTemplate        `json:"templates"`
-	Protocols  []protocolInfo           `json:"protocols"`
-	Answer     AnswerConfig             `json:"answer"`
-	Capability map[string]Capability    `json:"capability"`
-	Catalog    catalog.Status           `json:"catalog"`
+	Services   map[string]maskedServiceView `json:"services"`
+	Templates  []ServiceTemplate            `json:"templates"`
+	Protocols  []protocolInfo               `json:"protocols"`
+	Answer     AnswerConfig                 `json:"answer"`
+	Capability map[string]Capability        `json:"capability"`
+	Catalog    catalog.Status               `json:"catalog"`
 }
 
 func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.config.snapshot()
 	view := settingsView{
-		Services: cfg.Services, Templates: serviceTemplates, Answer: cfg.Answer,
+		Services: make(map[string]maskedServiceView, len(cfg.Services)), Templates: serviceTemplates, Answer: cfg.Answer,
 		Protocols: make([]protocolInfo, 0, len(protocols)),
 		Capability: map[string]Capability{
 			"answer":  resolveCapability(s.catalog, cfg.Services[cfg.Answer.Answer.Service], cfg.Answer.Answer),
 			"caption": resolveCapability(s.catalog, cfg.Services[cfg.Answer.Caption.Service], cfg.Answer.Caption),
 		},
+	}
+	for id, service := range cfg.Services {
+		configured := service.APIKey != ""
+		service.APIKey = ""
+		view.Services[id] = maskedServiceView{ServiceConfig: service, APIKeyConfigured: configured}
 	}
 	for _, protocol := range protocols {
 		view.Protocols = append(view.Protocols, protocolInfo{ID: protocol, Label: protocolLabel(protocol)})
@@ -195,11 +236,14 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
-	var service ServiceConfig
-	if !decodeJSON(w, r, &service) {
+	var input struct {
+		ServiceConfig
+		ClearAPIKey bool `json:"clear_api_key"`
+	}
+	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if err := s.config.updateService(r.PathValue("id"), service); err != nil {
+	if err := s.config.setService(r.PathValue("id"), input.ServiceConfig, false, input.ClearAPIKey); err != nil {
 		jsonError(w, http.StatusBadRequest, err)
 		return
 	}

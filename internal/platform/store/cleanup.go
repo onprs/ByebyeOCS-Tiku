@@ -24,6 +24,7 @@ type CleanupResult struct {
 	RequestPayloads int64
 	QueryAnswers    int64
 	ModelCalls      int64
+	PanelAudit      int64
 }
 
 // Cleanup 按有限批次清理过期缓存、幂等响应载荷、答案原文与调用明细。
@@ -70,6 +71,12 @@ func (s *Store) Cleanup(ctx context.Context, now time.Time, responseRetention ti
 					WHERE created_at < $1 AND answer IS NOT NULL
 					ORDER BY created_at LIMIT $2)`,
 			[]any{now.Add(-contentRetention), cleanupBatch},
+		},
+		{
+			&result.PanelAudit,
+			`DELETE FROM tiku.panel_audit WHERE id IN (
+			 SELECT id FROM tiku.panel_audit WHERE created_at < $1 ORDER BY created_at LIMIT $2)`,
+			[]any{now.Add(-180 * 24 * time.Hour), cleanupBatch},
 		},
 		{
 			&result.ModelCalls,

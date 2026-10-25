@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/onprs/OCS-Tiku/internal/catalog"
@@ -61,8 +62,13 @@ func main() {
 	if address == "" {
 		address = fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	}
-	if _, _, err := net.SplitHostPort(address); err != nil {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
 		log.Fatalf("监听地址无效: %v", err)
+	}
+	ip := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		log.Fatal("兼容本地服务仅支持回环监听；远程维护请使用 ocs-tiku-fork 的独立维护面板")
 	}
 	store, err := openStore(filepath.Join(*dataDir, "ocs-tiku.db"))
 	if err != nil {

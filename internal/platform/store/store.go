@@ -253,6 +253,7 @@ type CacheEntry struct {
 	InvalidationReason   string
 	InvalidatedBy        string
 	CreatedAt            time.Time
+	MaxAge               time.Duration
 }
 
 // LookupCache 只返回未失效且未过期的精确缓存。
@@ -282,8 +283,12 @@ func (s *Store) PutCache(ctx context.Context, e CacheEntry) (string, bool, error
 		return "", false, err
 	}
 	defer rollback(tx)
+	cutoff := time.Time{}
+	if e.MaxAge > 0 {
+		cutoff = time.Now().Add(-e.MaxAge)
+	}
 	if _, err := tx.Exec(ctx, `UPDATE tiku.cache_entries SET invalidated_at = now(), invalidation_reason = 'expired', invalidated_by = 'system'
-		WHERE cache_key = $1 AND invalidated_at IS NULL AND expires_at <= now()`, e.CacheKey); err != nil {
+		WHERE cache_key = $1 AND invalidated_at IS NULL AND (expires_at <= now() OR created_at <= $2)`, e.CacheKey, cutoff); err != nil {
 		return "", false, err
 	}
 	var id string

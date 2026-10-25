@@ -153,6 +153,7 @@ type fixtureOptions struct {
 
 type fixture struct {
 	handler http.Handler
+	svc     *answer.Service
 	cfg     *config.Config
 	store   *store.Store
 	llm     *fakeLLM
@@ -197,7 +198,7 @@ func newFixture(t *testing.T, opts fixtureOptions) *fixture {
 		t.Fatal(err)
 	}
 	svc := answer.New(cfg, st, map[string]string{"standard": "test-api-key", "caption-model": "test-api-key"}, client)
-	return &fixture{handler: New(cfg, svc, st, testToken, nil), cfg: cfg, store: st, llm: llm, pool: pool}
+	return &fixture{handler: New(cfg, svc, st, testToken, nil), svc: svc, cfg: cfg, store: st, llm: llm, pool: pool}
 }
 
 func testPool(t *testing.T) *pgxpool.Pool {
@@ -551,6 +552,18 @@ func TestModelDisabledNoFallback(t *testing.T) {
 	f.handler.ServeHTTP(models, modelsReq)
 	if strings.Contains(models.Body.String(), "fake-answer") || strings.Contains(models.Body.String(), "test-api-key") {
 		t.Fatal("内部模型列表不得泄露上游模型名或密钥")
+	}
+	offeringsReq := httptest.NewRequest(http.MethodGet, "/internal/v1/offerings", nil)
+	offeringsReq.Header.Set("Authorization", "Bearer "+testToken)
+	offerings := httptest.NewRecorder()
+	f.handler.ServeHTTP(offerings, offeringsReq)
+	if offerings.Code != http.StatusOK || !strings.Contains(offerings.Body.String(), `"items"`) {
+		t.Fatalf("内部公开目录不可用：%d %s", offerings.Code, offerings.Body.String())
+	}
+	anonymous := httptest.NewRecorder()
+	f.handler.ServeHTTP(anonymous, httptest.NewRequest(http.MethodGet, "/internal/v1/offerings", nil))
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatal("内部公开目录没有校验服务令牌", anonymous.Code)
 	}
 }
 

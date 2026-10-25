@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/onprs/OCS-Tiku/internal/platform/answer"
+	"github.com/onprs/OCS-Tiku/internal/platform/catalog"
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
 	"github.com/onprs/OCS-Tiku/internal/platform/store"
 )
@@ -22,23 +23,25 @@ import (
 const legacyMaxRequestBytes = 32 << 20
 
 type Server struct {
-	cfg    *config.Config
-	svc    *answer.Service
-	store  *store.Store
-	token  string
-	logger *slog.Logger
+	cfg     *config.Config
+	svc     *answer.Service
+	store   *store.Store
+	catalog *catalog.Service
+	token   string
+	logger  *slog.Logger
 }
 
 func New(cfg *config.Config, svc *answer.Service, st *store.Store, serviceToken string, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	s := &Server{cfg: cfg, svc: svc, store: st, token: serviceToken, logger: logger}
+	s := &Server{cfg: cfg, svc: svc, store: st, catalog: catalog.New(cfg, st.Pool()), token: serviceToken, logger: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/search", s.legacySearch)
 	mux.HandleFunc("GET /api/search", s.legacyProbe)
 	mux.HandleFunc("POST /api/v2/answers", s.answerV2)
 	mux.HandleFunc("GET /internal/v1/models", s.internalModels)
+	mux.HandleFunc("GET /internal/v1/offerings", s.internalOfferings)
 	mux.HandleFunc("PATCH /internal/v1/models/{id}", s.internalModelPatch)
 	mux.HandleFunc("POST /internal/v1/models/{id}/tests", s.internalModelTest)
 	mux.HandleFunc("POST /internal/v1/cache/invalidations", s.internalCacheInvalidate)
@@ -109,6 +112,8 @@ func routeName(r *http.Request) string {
 		return "v2_answers"
 	case r.URL.Path == "/internal/v1/models":
 		return "internal_models"
+	case r.URL.Path == "/internal/v1/offerings":
+		return "internal_offerings"
 	case strings.HasPrefix(r.URL.Path, "/internal/v1/models/"):
 		if strings.HasSuffix(r.URL.Path, "/tests") {
 			return "internal_model_test"
@@ -239,6 +244,19 @@ func (s *Server) internalModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": models})
+}
+
+// internalOfferings 向主平台提供公开条目目录；价格、缓存策略与健康状态由题库派生。
+func (s *Server) internalOfferings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceToken(w, r) {
+		return
+	}
+	items, err := s.catalog.List(r.Context())
+	if err != nil {
+		writeErrorV2(w, http.StatusServiceUnavailable, "service_unavailable", "暂时无法读取公开模型条目", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) internalModelPatch(w http.ResponseWriter, r *http.Request) {

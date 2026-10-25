@@ -22,6 +22,7 @@ import (
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
 	"github.com/onprs/OCS-Tiku/internal/platform/httpapi"
 	"github.com/onprs/OCS-Tiku/internal/platform/modelclient"
+	"github.com/onprs/OCS-Tiku/internal/platform/panel"
 	"github.com/onprs/OCS-Tiku/internal/platform/store"
 )
 
@@ -34,12 +35,15 @@ func main() {
 
 func run(args []string) error {
 	if len(args) < 1 {
-		return errors.New("用法：ocs-tiku-fork <config check|migrate|serve> [-config 路径]")
+		return errors.New("用法：ocs-tiku-fork <config check|migrate|serve|panel-password> [-config 路径]")
 	}
 	command := args[0]
 	rest := args[1:]
+	if command == "panel-password" {
+		return panelPassword(rest)
+	}
 	if command != "config" && command != "migrate" && command != "serve" {
-		return errors.New("未知命令，可用：config check、migrate、serve")
+		return errors.New("未知命令，可用：config check、migrate、serve、panel-password")
 	}
 	if command == "config" {
 		if len(rest) == 0 || rest[0] != "check" {
@@ -105,6 +109,9 @@ func checkConfig(cfg *config.Config) error {
 		}
 	}
 	if _, _, err := loadSecrets(cfg); err != nil {
+		return err
+	}
+	if _, err := panel.LoadCredentials(cfg.Panel); err != nil {
 		return err
 	}
 	host, _, _ := net.SplitHostPort(cfg.Listen)
@@ -180,6 +187,9 @@ func migrate(cfg *config.Config) error {
 }
 
 func serve(cfg *config.Config) error {
+	if _, err := panel.LoadCredentials(cfg.Panel); err != nil {
+		return err
+	}
 	token, keys, err := loadSecrets(cfg)
 	if err != nil {
 		return err
@@ -216,11 +226,11 @@ func serve(cfg *config.Config) error {
 			result, err := st.Cleanup(cleanupCtx, time.Now(), cfg.IdempotencyRetention())
 			if err != nil {
 				logger.Warn("fork 数据清理未完成", "cache_entries", result.CacheEntries,
-					"request_payloads", result.RequestPayloads, "query_answers", result.QueryAnswers, "model_calls", result.ModelCalls)
+					"request_payloads", result.RequestPayloads, "query_answers", result.QueryAnswers, "model_calls", result.ModelCalls, "panel_audit", result.PanelAudit)
 				return
 			}
 			logger.Info("fork 数据清理完成", "cache_entries", result.CacheEntries,
-				"request_payloads", result.RequestPayloads, "query_answers", result.QueryAnswers, "model_calls", result.ModelCalls)
+				"request_payloads", result.RequestPayloads, "query_answers", result.QueryAnswers, "model_calls", result.ModelCalls, "panel_audit", result.PanelAudit)
 		}
 		cleanup()
 		for {
@@ -234,6 +244,13 @@ func serve(cfg *config.Config) error {
 	}()
 	svc := answer.New(cfg, st, keys, client)
 	handler := httpapi.New(cfg, svc, st, token, logger)
+	if cfg.Panel.Enabled {
+		maintenance, err := panel.New(cfg, svc, st)
+		if err != nil {
+			return err
+		}
+		handler = panel.Mount(handler, maintenance)
+	}
 	server := &http.Server{
 		Addr: cfg.Listen, Handler: handler,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
