@@ -305,7 +305,7 @@ function modelTest(model, functional) {
   footer.append(submit);
   dialog.append(result, footer);
 }
-const protocolLabels = { 'openai-chat': 'OpenAI 兼容', 'anthropic-messages': 'Anthropic', 'gemini-generate': 'Gemini', 'ollama-chat': 'Ollama' };
+const protocolLabels = { 'openai-chat': 'OpenAI 兼容', 'anthropic-messages': 'Anthropic', 'gemini-generate-content': 'Gemini', 'ollama-chat': 'Ollama' };
 const capabilityLabels = { text: '文本', vision: '图片', tool_call: '工具调用' };
 const microsToYuanInput = value => {
   if (value == null || value === '') return '';
@@ -369,13 +369,14 @@ function offeringCard(model, offering, settings, orphan = false) {
   } else if (session.role === 'maintainer') {
     const actions = node('div', 'actions model-actions');
     actions.append(button(offering ? '编辑' : '发布', () => offeringDialog(offering, model, settings)));
+    actions.append(button('编辑配置', () => upstreamModelDialog(model)));
     actions.append(button('连通测试', () => modelTest(model, false)), button('功能测试', () => modelTest(model, true)));
     const toggle = button(model.enabled ? '停用' : '启用', async element => {
       element.disabled = true;
       try { await api('/models/' + encodeURIComponent(model.id), { method: 'PATCH', body: JSON.stringify({ enabled: !model.enabled }) }); notify('模型状态已更新'); loadPage(); } catch (error) { notify(error.message, true); element.disabled = false; }
     });
     toggle.disabled = model.locked;
-    actions.append(toggle);
+    actions.append(toggle, button('删除模型', () => deleteModelDialog(model)));
     card.append(actions);
   }
   return card;
@@ -383,7 +384,18 @@ function offeringCard(model, offering, settings, orphan = false) {
 async function renderOfferings(page) {
   const [offeringData, modelData, settings] = await Promise.all([api('/offerings'), api('/models'), api('/settings')]);
   const models = modelData.items;
-  if (!models.length) { page.append(node('div', 'card empty', '尚未配置模型；请先在题库配置中声明上游模型。')); return; }
+  const setup = node('section', 'card');
+  const setupHeader = node('div', 'card-header');
+  setupHeader.append(node('h2', '', '上游模型'));
+  if (session.role === 'maintainer') setupHeader.append(button('新增上游模型', () => upstreamModelDialog(null), 'primary'));
+  setup.append(setupHeader, node('p', 'muted', '在这里配置上游模型地址、模型名和密钥；保存后立即生效。密钥只写入题库服务私密文件，不会回显。'));
+  page.append(setup);
+  if (!models.length) {
+    const empty = node('div', 'card empty');
+    empty.append(node('p', '', '尚未配置上游模型。'), session.role === 'maintainer' ? button('新增上游模型', () => upstreamModelDialog(null), 'primary') : node('span', '', '请联系维护员配置上游模型。'));
+    page.append(empty);
+    return;
+  }
   const byProvider = new Map(offeringData.items.map(item => [item.provider_ref, item]));
   const ordered = [...models].sort((a, b) => {
     const left = byProvider.get(a.id), right = byProvider.get(b.id);
@@ -403,6 +415,143 @@ async function renderOfferings(page) {
   page.append(grid);
   page.append(node('p', 'small muted', '价格与缓存策略保存后立即对主平台生效；已完成查询继续使用当时冻结的价格与策略。已发布条目不提供删除，只能下架。'));
 }
+function upstreamModelDialog(model) {
+  const isNew = !model;
+  const dialog = openDialog(isNew ? '新增上游模型' : '编辑上游模型');
+  const form = node('form');
+  const id = input('text', 'id');
+  id.required = isNew;
+  id.value = model?.id ?? '';
+  id.disabled = !isNew;
+  const displayName = input('text', 'display_name');
+  displayName.value = model?.display_name ?? '';
+  const protocol = select('接入协议', [['openai-chat', 'OpenAI 兼容'], ['anthropic-messages', 'Anthropic'], ['gemini-generate-content', 'Gemini'], ['ollama-chat', 'Ollama']], model?.protocol ?? 'openai-chat', () => { });
+  const vendor = input('text', 'vendor');
+  vendor.required = false;
+  vendor.value = model?.vendor ?? '';
+  const baseURL = input('text', 'base_url');
+  baseURL.value = model?.base_url ?? '';
+  baseURL.placeholder = 'https://models.example.com/v1';
+  const upstreamModel = input('text', 'upstream_model');
+  upstreamModel.value = model?.upstream_model ?? '';
+  const apiKey = input('password', 'api_key', 'new-password');
+  apiKey.required = false;
+  apiKey.placeholder = isNew ? '非 Ollama 模型必填' : '留空保留原密钥';
+  const vision = input('checkbox', 'vision');
+  vision.required = false;
+  vision.checked = model?.vision ?? false;
+  const toolCall = input('checkbox', 'tool_call');
+  toolCall.required = false;
+  toolCall.checked = model?.tool_call ?? false;
+  const reasoning = input('checkbox', 'reasoning');
+  reasoning.required = false;
+  reasoning.checked = model?.reasoning ?? false;
+  const context = input('number', 'context');
+  context.required = false;
+  context.min = '0';
+  context.value = String(model?.context ?? 128000);
+  const maxOutput = input('number', 'max_output_tokens');
+  maxOutput.required = false;
+  maxOutput.min = '0';
+  maxOutput.value = String(model?.max_output_tokens ?? 2048);
+  const enabled = input('checkbox', 'enabled');
+  enabled.required = false;
+  enabled.checked = model ? !model.locked : true;
+  const caption = input('checkbox', 'is_caption');
+  caption.required = false;
+  caption.checked = model?.is_caption ?? false;
+  const makeCheck = (inputNode, labelText) => {
+    const row = node('div', 'check-row');
+    if (!inputNode.id) inputNode.id = 'field-' + crypto.randomUUID();
+    const label = node('label', '', labelText);
+    label.htmlFor = inputNode.id;
+    row.append(inputNode, label);
+    return row;
+  };
+  const error = node('p', 'form-error');
+  error.setAttribute('role', 'alert');
+  const submit = node('button', 'primary', isNew ? '添加模型' : '保存模型');
+  submit.type = 'submit';
+  form.append(
+    field('模型标识', id),
+    field('显示名称', displayName),
+    field('接入协议', protocol),
+    field('供应商（可选）', vendor),
+    field('接口地址', baseURL),
+    field('上游模型名', upstreamModel),
+    field('API 密钥', apiKey),
+    makeCheck(vision, '支持图片输入'),
+    makeCheck(toolCall, '支持工具调用'),
+    makeCheck(reasoning, '支持推理内容'),
+    field('上下文长度', context),
+    field('单次最大输出 token', maxOutput),
+    makeCheck(enabled, '配置允许启用'),
+    makeCheck(caption, '作为图片转述模型'),
+    node('p', 'small muted', '接口地址必须使用 HTTPS；本地测试的 http 回环地址需要服务配置显式允许。密钥只保存在题库服务的私密文件中。面板的“停用/启用”是独立的临时开关。'),
+    error,
+    submit,
+  );
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    error.textContent = '';
+    submit.disabled = true;
+    try {
+      const protocolValue = protocol.value;
+      if (isNew && !id.value.trim()) throw new Error('请填写模型标识');
+      if (!displayName.value.trim()) throw new Error('请填写显示名称');
+      if (!upstreamModel.value.trim()) throw new Error('请填写上游模型名');
+      if (!baseURL.value.trim()) throw new Error('请填写接口地址');
+      if (protocolValue !== 'ollama-chat' && isNew && !apiKey.value.trim()) throw new Error('请填写 API 密钥');
+      const payload = {
+        display_name: displayName.value.trim(),
+        protocol: protocolValue,
+        vendor: vendor.value.trim(),
+        base_url: baseURL.value.trim(),
+        upstream_model: upstreamModel.value.trim(),
+        vision: vision.checked,
+        tool_call: toolCall.checked,
+        reasoning: reasoning.checked,
+        context: Number(context.value) || 0,
+        max_output_tokens: Number(maxOutput.value) || 0,
+        disabled: !enabled.checked,
+        is_caption: caption.checked,
+      };
+      if (apiKey.value.trim()) payload.api_key = apiKey.value.trim();
+      if (isNew) payload.id = id.value.trim();
+      await api(isNew ? '/upstream-models' : '/upstream-models/' + encodeURIComponent(model.id), { method: isNew ? 'POST' : 'PATCH', body: JSON.stringify(payload) });
+      dialog.close();
+      notify(isNew ? '上游模型已添加' : '上游模型已更新');
+      loadPage();
+    } catch (failure) {
+      error.textContent = failure.message;
+      submit.disabled = false;
+    }
+  });
+  dialog.append(form);
+}
+
+function deleteModelDialog(model) {
+  const dialog = openDialog('删除上游模型');
+  const error = node('p', 'form-error');
+  dialog.append(node('p', '', '删除 ' + model.display_name + '（' + model.id + '）后，该模型不能再用于作答。仍有公开条目引用时会被拒绝。'), error);
+  const footer = node('div', 'dialog-footer');
+  const submit = button('删除模型', async element => {
+    element.disabled = true;
+    try {
+      await api('/upstream-models/' + encodeURIComponent(model.id), { method: 'DELETE' });
+      dialog.close();
+      notify('上游模型已删除');
+      loadPage();
+    } catch (failure) {
+      error.textContent = failure.message;
+      element.disabled = false;
+    }
+  }, 'danger');
+  footer.append(button('取消', () => dialog.close()), submit);
+  dialog.append(footer);
+}
+
 function offeringDialog(offering, model, settings) {
   const dialog = openDialog(offering ? '编辑公开模型' : '发布公开模型');
   const form = node('form');

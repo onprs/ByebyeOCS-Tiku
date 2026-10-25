@@ -12,6 +12,7 @@ import (
 
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
 	"github.com/onprs/OCS-Tiku/internal/platform/modelclient"
+	"github.com/onprs/OCS-Tiku/internal/platform/models"
 	"github.com/onprs/OCS-Tiku/internal/platform/normalize"
 	"github.com/onprs/OCS-Tiku/internal/platform/store"
 )
@@ -137,15 +138,22 @@ type TestResult struct {
 type Service struct {
 	cfg    *config.Config
 	store  *store.Store
-	keys   map[string]string
+	models *models.Registry
 	client *modelclient.Client
 	sem    chan struct{}
 	now    func() time.Time
 }
 
+// New 保留既有构造方式，按初始配置与密钥创建不可变快照。
 func New(cfg *config.Config, st *store.Store, keys map[string]string, client *modelclient.Client) *Service {
+	return NewWithRegistry(cfg, st, models.New(cfg.Models, keys), client)
+}
+
+// NewWithRegistry 使用与维护面板共享的模型注册表，支持配置热更新。
+func NewWithRegistry(cfg *config.Config, st *store.Store, registry *models.Registry, client *modelclient.Client) *Service {
+	registry.SetDefaults(cfg.DefaultModelID, cfg.CaptionModelID)
 	return &Service{
-		cfg: cfg, store: st, keys: keys, client: client,
+		cfg: cfg, store: st, models: registry, client: client,
 		sem: make(chan struct{}, cfg.Limits.Concurrency),
 		now: time.Now,
 	}
@@ -337,12 +345,12 @@ func (s *Service) validate(req Request) (*config.Model, normalize.Question, stri
 	}
 	modelID := req.ModelOfferingID
 	if modelID == "" {
-		modelID = s.cfg.DefaultModelID
+		modelID = s.models.DefaultID()
 	}
 	if modelID == "" {
 		return nil, normalize.Question{}, "", "", newError("model_unavailable", "未配置可用的默认模型", 503, false)
 	}
-	model := s.cfg.Model(modelID)
+	model := s.models.Model(modelID)
 	if model == nil {
 		// 使用独立错误码：这里在写入请求记录前就失败，没有模型调用或费用，
 		// 与上游调用阶段的 model_unavailable 区分，调用方可安全重试。
@@ -458,11 +466,11 @@ func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Qu
 	usage := Usage{Calls: calls, Complete: true}
 	var captions []string
 	if len(q.Images) > 0 && !model.Vision {
-		captionID := s.cfg.CaptionModelID
+		captionID := s.models.CaptionID()
 		if captionID == "" {
 			return "", usage, newError("vision_unsupported", "当前模型不支持图片，且未配置图片转述模型", 422, false)
 		}
-		caption := s.cfg.Model(captionID)
+		caption := s.models.Model(captionID)
 		if caption == nil {
 			return "", usage, newError("vision_unsupported", "图片转述模型未配置", 422, false)
 		}
@@ -476,7 +484,7 @@ func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Qu
 		for _, img := range q.Images {
 			result, err := s.client.Chat(ctx, modelclient.Call{
 				Protocol: caption.Protocol, Vendor: caption.Vendor,
-				BaseURL: caption.BaseURL, APIKey: s.keys[caption.ID], Model: caption.Model,
+				BaseURL: caption.BaseURL, APIKey: s.models.Key(caption.ID), Model: caption.Model,
 				System: "你只描述图片中可见的文字和关键信息，不回答题目。",
 				Prompt: "请转述这张题目图片的文字与关键信息。", Images: []normalize.Image{img},
 				MaxOutputTokens: minInt(512, caption.EffectiveMaxOutputTokens(s.cfg.Limits.MaxOutputTokens)), Temperature: 0.1,
@@ -496,7 +504,7 @@ func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Qu
 	prompt := buildPrompt(q, captions)
 	result, err := s.client.Chat(ctx, modelclient.Call{
 		Protocol: model.Protocol, Vendor: model.Vendor,
-		BaseURL: model.BaseURL, APIKey: s.keys[model.ID], Model: model.Model,
+		BaseURL: model.BaseURL, APIKey: s.models.Key(model.ID), Model: model.Model,
 		System: "你是学习通题库答题助手。请根据题目给出答案，输出 <answer>答案</answer>。",
 		Prompt: prompt, Images: pickImages(q.Images, model.Vision), MaxOutputTokens: maxTokens, Temperature: 0,
 	})
@@ -673,9 +681,10 @@ func (s *Service) Models(ctx context.Context) ([]ModelView, error) {
 	if err != nil {
 		return nil, newError("internal_error", "无法读取模型状态", 500, false)
 	}
-	result := make([]ModelView, 0, len(s.cfg.Models))
-	for i := range s.cfg.Models {
-		model := &s.cfg.Models[i]
+	items := s.models.Models()
+	result := make([]ModelView, 0, len(items))
+	for i := range items {
+		model := &items[i]
 		disabled := model.Disabled || overrides[model.ID]
 		health := "configured"
 		if disabled {
@@ -689,7 +698,7 @@ func (s *Service) Models(ctx context.Context) ([]ModelView, error) {
 }
 
 func (s *Service) SetModelDisabled(ctx context.Context, modelID string, disabled bool) error {
-	if s.cfg.Model(modelID) == nil {
+	if s.models.Model(modelID) == nil {
 		return newError("not_found", "模型条目不存在", 404, false)
 	}
 	if err := s.store.SetModelDisabled(ctx, modelID, disabled); err != nil {
@@ -699,7 +708,7 @@ func (s *Service) SetModelDisabled(ctx context.Context, modelID string, disabled
 }
 
 func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCost bool) (TestResult, error) {
-	model := s.cfg.Model(modelID)
+	model := s.models.Model(modelID)
 	if model == nil {
 		return TestResult{}, newError("not_found", "模型条目不存在", 404, false)
 	}
@@ -715,7 +724,7 @@ func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCo
 	var usage *Usage
 	if kind == "reachability" {
 		testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		testErr = s.client.Reachability(testCtx, model.Protocol, model.BaseURL, s.keys[model.ID])
+		testErr = s.client.Reachability(testCtx, model.Protocol, model.BaseURL, s.models.Key(model.ID))
 		cancel()
 		result.Reachable = testErr == nil
 	} else {
@@ -740,7 +749,7 @@ func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCo
 		}
 		response, err := s.client.Chat(testCtx, modelclient.Call{
 			Protocol: model.Protocol, Vendor: model.Vendor,
-			BaseURL: model.BaseURL, APIKey: s.keys[model.ID], Model: model.Model,
+			BaseURL: model.BaseURL, APIKey: s.models.Key(model.ID), Model: model.Model,
 			System: "只回复 OK", Prompt: "请回复 OK", MaxOutputTokens: 16, Temperature: 0,
 		})
 		testErr = err

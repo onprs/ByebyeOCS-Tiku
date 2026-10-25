@@ -17,6 +17,7 @@ import (
 	"github.com/onprs/OCS-Tiku/internal/platform/answer"
 	"github.com/onprs/OCS-Tiku/internal/platform/catalog"
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
+	"github.com/onprs/OCS-Tiku/internal/platform/models"
 	"github.com/onprs/OCS-Tiku/internal/platform/store"
 )
 
@@ -31,11 +32,11 @@ type Server struct {
 	logger  *slog.Logger
 }
 
-func New(cfg *config.Config, svc *answer.Service, st *store.Store, serviceToken string, logger *slog.Logger) http.Handler {
+func New(cfg *config.Config, svc *answer.Service, st *store.Store, serviceToken string, logger *slog.Logger, registry *models.Registry) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	s := &Server{cfg: cfg, svc: svc, store: st, catalog: catalog.New(cfg, st.Pool()), token: serviceToken, logger: logger}
+	s := &Server{cfg: cfg, svc: svc, store: st, catalog: catalog.NewWithRegistry(cfg, st.Pool(), registry), token: serviceToken, logger: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/search", s.legacySearch)
 	mux.HandleFunc("GET /api/search", s.legacyProbe)

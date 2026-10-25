@@ -26,6 +26,7 @@ import (
 	"github.com/onprs/OCS-Tiku/internal/platform/answer"
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
 	"github.com/onprs/OCS-Tiku/internal/platform/modelclient"
+	"github.com/onprs/OCS-Tiku/internal/platform/models"
 	"github.com/onprs/OCS-Tiku/internal/platform/store"
 )
 
@@ -152,12 +153,26 @@ type fixtureOptions struct {
 }
 
 type fixture struct {
-	handler http.Handler
-	svc     *answer.Service
-	cfg     *config.Config
-	store   *store.Store
-	llm     *fakeLLM
-	pool    *pgxpool.Pool
+	handler  http.Handler
+	svc      *answer.Service
+	cfg      *config.Config
+	store    *store.Store
+	registry *models.Registry
+	keys     map[string]string
+	llm      *fakeLLM
+	pool     *pgxpool.Pool
+}
+
+// writeFixtureConfig 把测试配置写成面板可回写的私密文件。
+func writeFixtureConfig(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.SourcePath, append(data, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newFixture(t *testing.T, opts fixtureOptions) *fixture {
@@ -197,8 +212,19 @@ func newFixture(t *testing.T, opts fixtureOptions) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := answer.New(cfg, st, map[string]string{"standard": "test-api-key", "caption-model": "test-api-key"}, client)
-	return &fixture{handler: New(cfg, svc, st, testToken, nil), svc: svc, cfg: cfg, store: st, llm: llm, pool: pool}
+	keyDir := t.TempDir()
+	keys := map[string]string{"standard": "test-api-key", "caption-model": "caption-test-key"}
+	for index := range cfg.Models {
+		path := filepath.Join(keyDir, cfg.Models[index].ID+".key")
+		if err := os.WriteFile(path, []byte(keys[cfg.Models[index].ID]+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Models[index].APIKeyFile = path
+	}
+	cfg.SourcePath = filepath.Join(keyDir, "ocs-tiku-fork.json")
+	registry := models.New(cfg.Models, keys)
+	svc := answer.NewWithRegistry(cfg, st, registry, client)
+	return &fixture{handler: New(cfg, svc, st, testToken, nil, registry), svc: svc, cfg: cfg, store: st, registry: registry, keys: keys, llm: llm, pool: pool}
 }
 
 func testPool(t *testing.T) *pgxpool.Pool {
@@ -1003,6 +1029,9 @@ func TestV2AcceptsImagesWithoutTextMarkers(t *testing.T) {
 func TestBudgetAboveModelLimitClampsToModelLimit(t *testing.T) {
 	f := newFixture(t, fixtureOptions{vision: true, caption: true})
 	f.cfg.Models[0].MaxOutputTokens = 64
+	if err := f.registry.Replace(f.cfg.Models, f.keys); err != nil {
+		t.Fatal(err)
+	}
 	request := v2Request("低上限模型题", "A. 甲\nB. 乙", "cache_first", "req-budget-clamp-0001", "idem-budget-clamp-0001", nil)
 	request.Budget.MaxOutputTokens = 128
 	response := decodeResponse(t, answerV2(t, f, request, "idem-budget-clamp-0001"))

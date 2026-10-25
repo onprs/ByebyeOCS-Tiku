@@ -19,6 +19,8 @@ import (
 	"github.com/onprs/OCS-Tiku/internal/platform/answer"
 	"github.com/onprs/OCS-Tiku/internal/platform/catalog"
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
+	"github.com/onprs/OCS-Tiku/internal/platform/modelconfig"
+	"github.com/onprs/OCS-Tiku/internal/platform/models"
 	"github.com/onprs/OCS-Tiku/internal/platform/store"
 )
 
@@ -26,15 +28,17 @@ import (
 var assets embed.FS
 
 type Server struct {
-	cfg     *config.Config
-	svc     *answer.Service
-	store   *store.Store
-	catalog *catalog.Service
-	auth    *authentication
-	secure  bool
+	cfg      *config.Config
+	svc      *answer.Service
+	store    *store.Store
+	catalog  *catalog.Service
+	registry *models.Registry
+	editor   *modelconfig.Editor
+	auth     *authentication
+	secure   bool
 }
 
-func New(cfg *config.Config, svc *answer.Service, st *store.Store) (http.Handler, error) {
+func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *models.Registry) (http.Handler, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -42,7 +46,9 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store) (http.Handler
 	if err != nil {
 		return nil, err
 	}
-	server := &Server{cfg: cfg, svc: svc, store: st, catalog: catalog.New(cfg, st.Pool()), auth: auth, secure: strings.HasPrefix(cfg.Panel.Origin, "https://")}
+	editor, _ := modelconfig.NewEditor(cfg, registry)
+	server := &Server{cfg: cfg, svc: svc, store: st, catalog: catalog.NewWithRegistry(cfg, st.Pool(), registry),
+		registry: registry, editor: editor, auth: auth, secure: strings.HasPrefix(cfg.Panel.Origin, "https://")}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /panel/api/login", server.login)
 	mux.HandleFunc("GET /panel/api/session", server.protect(false, server.session))
@@ -58,6 +64,9 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store) (http.Handler
 	mux.HandleFunc("GET /panel/api/offerings/{id}/price-versions", server.protect(false, server.priceVersions))
 	mux.HandleFunc("POST /panel/api/offerings/{id}/tests", server.protect(true, server.testOffering))
 	mux.HandleFunc("POST /panel/api/offerings/{id}/retirements", server.protect(true, server.retireOffering))
+	mux.HandleFunc("POST /panel/api/upstream-models", server.protect(true, server.createModel))
+	mux.HandleFunc("PATCH /panel/api/upstream-models/{id}", server.protect(true, server.updateModel))
+	mux.HandleFunc("DELETE /panel/api/upstream-models/{id}", server.protect(true, server.deleteModel))
 	mux.HandleFunc("GET /panel/api/requests", server.protect(false, server.requests))
 	mux.HandleFunc("GET /panel/api/requests/{id}", server.protect(false, server.request))
 	mux.HandleFunc("GET /panel/api/cache", server.protect(false, server.cache))
@@ -235,14 +244,21 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request, current session)
 	}
 	items := make([]any, 0, len(models))
 	for _, model := range models {
-		configured := s.cfg.Model(model.ID)
+		configured := s.registry.Model(model.ID)
+		if configured == nil {
+			continue
+		}
 		items = append(items, map[string]any{"id": model.ID, "display_name": model.DisplayName, "capabilities": model.Capabilities, "enabled": model.Enabled, "health": model.Health,
-			"protocol": configured.Protocol, "key_configured": configured.APIKeyFile != "", "locked": configured.Disabled, "last_test": last[model.ID]})
+			"protocol": configured.Protocol, "vendor": configured.Vendor, "base_url": configured.BaseURL,
+			"upstream_model": configured.Model, "vision": configured.Vision, "tool_call": configured.ToolCall,
+			"reasoning": configured.Reasoning, "context": configured.Context, "max_output_tokens": configured.MaxOutputTokens,
+			"key_configured": configured.APIKeyFile != "", "locked": configured.Disabled,
+			"is_caption": s.registry.CaptionID() == model.ID, "last_test": last[model.ID]})
 	}
 	jsonResponse(w, 200, map[string]any{"items": items})
 }
 func (s *Server) setModel(w http.ResponseWriter, r *http.Request, current session) {
-	model := s.cfg.Model(r.PathValue("id"))
+	model := s.registry.Model(r.PathValue("id"))
 	if model == nil {
 		fail(w, 404, "not_found", "模型不存在")
 		return
@@ -269,7 +285,7 @@ func (s *Server) setModel(w http.ResponseWriter, r *http.Request, current sessio
 }
 func (s *Server) testModel(w http.ResponseWriter, r *http.Request, current session) {
 	modelID := r.PathValue("id")
-	if s.cfg.Model(modelID) == nil {
+	if s.registry.Model(modelID) == nil {
 		fail(w, 404, "not_found", "模型不存在")
 		return
 	}
@@ -403,8 +419,8 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request, current sessio
 	}
 	jsonResponse(w, 200, map[string]any{"cache_ttl_days": s.cfg.Cache.TTLDays, "cache_max_ttl_days": s.cfg.Cache.MaxTTLDays, "shared_cache_enabled": s.cfg.Cache.SharedEnabled,
 		"max_output_tokens": s.cfg.Limits.MaxOutputTokens, "concurrency": s.cfg.Limits.Concurrency, "timeout_seconds": s.cfg.Limits.TimeoutSeconds,
-		"model_count": len(s.cfg.Models), "offering_count": len(offerings), "published_offering_count": enabled,
-		"default_offering_id": defaultOffering, "caption_model_id": s.cfg.CaptionModelID})
+		"model_count": len(s.registry.Models()), "offering_count": len(offerings), "published_offering_count": enabled,
+		"default_offering_id": defaultOffering, "caption_model_id": s.registry.CaptionID()})
 }
 func (s *Server) audit(w http.ResponseWriter, r *http.Request, current session) {
 	filter, ok := listFilter(w, r, "")

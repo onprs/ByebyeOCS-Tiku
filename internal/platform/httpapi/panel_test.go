@@ -32,7 +32,8 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.cfg.Panel = config.Panel{Enabled: true, Origin: origin, Users: []config.PanelUser{{Username: "maintainer", Role: "maintainer", PasswordHashFile: hashPath}, {Username: "viewer", Role: "viewer", PasswordHashFile: hashPath}}}
-	handler, err := panel.New(f.cfg, f.svc, f.store)
+	writeFixtureConfig(t, f.cfg)
+	handler, err := panel.New(f.cfg, f.svc, f.store, f.registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +238,39 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	}
 	if status, _, data := request(client, "POST", "/panel/api/offerings/"+created.PublicID+"/retirements", csrf, map[string]any{"version": created.Version + 1}, nil); status != 200 || !strings.Contains(string(data), `"enabled":false`) || !strings.Contains(string(data), `"is_default":false`) {
 		t.Fatal("停用公开条目失败", status, string(data))
+	}
+	upstream := map[string]any{
+		"id": "panel-model", "display_name": "面板新增模型", "protocol": "openai-chat",
+		"base_url": f.llm.server.URL + "/v1", "upstream_model": "fake-answer", "api_key": "panel-secret-key",
+		"context": 128000, "max_output_tokens": 512,
+	}
+	if status, _, _ := request(viewer, "POST", "/panel/api/upstream-models", viewerCSRF, upstream, nil); status != 403 {
+		t.Fatal("只读账号新增了上游模型", status)
+	}
+	if status, _, data := request(client, "POST", "/panel/api/upstream-models", csrf, upstream, nil); status != 201 {
+		t.Fatal("维护员新增上游模型失败", status, string(data))
+	}
+	status, _, data = request(client, "GET", "/panel/api/models", "", nil, nil)
+	if status != 200 || !strings.Contains(string(data), "panel-model") || !strings.Contains(string(data), `"key_configured":true`) || strings.Contains(string(data), "panel-secret-key") {
+		t.Fatal("上游模型列表不完整或泄漏密钥", status, string(data))
+	}
+	if result := decodeResponse(t, answerV2(t, f, v2Request("热加载模型题", "A. 甲", "always_llm", "panel-hot-model", "panel-hot-model-key", nil), "panel-hot-model-key")); result.Answer != "A" {
+		t.Fatal("新增模型未热加载到作答服务")
+	}
+	edited := map[string]any{"display_name": "面板更新模型", "protocol": "openai-chat", "base_url": f.llm.server.URL + "/v1",
+		"upstream_model": "fake-answer", "context": 128000, "max_output_tokens": 512}
+	if status, _, data := request(client, "PATCH", "/panel/api/upstream-models/panel-model", csrf, edited, nil); status != 200 {
+		t.Fatal("更新上游模型失败", status, string(data))
+	}
+	status, _, data = request(client, "GET", "/panel/api/models", "", nil, nil)
+	if status != 200 || !strings.Contains(string(data), "面板更新模型") {
+		t.Fatal("更新后的模型未生效", status, string(data))
+	}
+	if status, _, data := request(client, "DELETE", "/panel/api/upstream-models/panel-model", csrf, nil, nil); status != 200 {
+		t.Fatal("删除上游模型失败", status, string(data))
+	}
+	if status, _, data := request(client, "GET", "/panel/api/models", "", nil, nil); status != 200 || strings.Contains(string(data), "panel-model") {
+		t.Fatal("删除后的模型仍在列表", status, string(data))
 	}
 	if status, _, _ := request(client, "POST", "/panel/api/logout", csrf, map[string]any{}, nil); status != 200 {
 		t.Fatal("无法退出维护会话")

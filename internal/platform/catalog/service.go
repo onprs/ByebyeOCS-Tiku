@@ -5,6 +5,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
+	"github.com/onprs/OCS-Tiku/internal/platform/models"
 )
 
 // Input 是面板提交的可编辑字段；公开编号、版本与时间戳由服务生成。
@@ -23,12 +24,18 @@ type Input struct {
 // Service 把数据库中的公开条目与题库配置模型合并，并派生健康状态。
 // 主平台读取同一份事实，题库面板是唯一写入入口。
 type Service struct {
-	cfg   *config.Config
-	store *Store
+	cfg    *config.Config
+	models *models.Registry
+	store  *Store
 }
 
 func New(cfg *config.Config, pool *pgxpool.Pool) *Service {
-	return &Service{cfg: cfg, store: NewStore(pool)}
+	return NewWithRegistry(cfg, pool, models.New(cfg.Models, nil))
+}
+
+// NewWithRegistry 使用与作答服务、维护面板共享的模型快照。
+func NewWithRegistry(cfg *config.Config, pool *pgxpool.Pool, registry *models.Registry) *Service {
+	return &Service{cfg: cfg, models: registry, store: NewStore(pool)}
 }
 
 func (s *Service) List(ctx context.Context) ([]Offering, error) {
@@ -114,9 +121,9 @@ func (s *Service) Retire(ctx context.Context, publicID string, version int64) (*
 
 // ModelProfile 返回公开能力校验所需的模型事实；模型不存在时拒绝发布。
 func (s *Service) ModelProfile(providerRef string) (ModelProfile, error) {
-	for i := range s.cfg.Models {
-		if s.cfg.Models[i].ID == providerRef {
-			return ModelProfile{Vision: s.cfg.Models[i].Vision}, nil
+	for _, item := range s.models.Models() {
+		if item.ID == providerRef {
+			return ModelProfile{Vision: item.Vision}, nil
 		}
 	}
 	return ModelProfile{}, invalid("模型引用不存在或未在题库配置中声明")
@@ -142,10 +149,8 @@ func (s *Service) build(current *Offering, input Input) (*Offering, error) {
 	if err != nil {
 		return nil, err
 	}
-	for i := range s.cfg.Models {
-		if s.cfg.Models[i].ID == item.ProviderRef && s.cfg.Models[i].Disabled && item.Enabled {
-			return nil, invalid("该模型已被题库配置停用，不能发布为可见条目")
-		}
+	if configured := s.models.Model(item.ProviderRef); configured != nil && configured.Disabled && item.Enabled {
+		return nil, invalid("该模型已被题库配置停用，不能发布为可见条目")
 	}
 	if err := item.Normalize(profile, s.cfg.Cache.MaxTTLDays, s.cfg.Cache.SharedEnabled); err != nil {
 		return nil, err
@@ -170,12 +175,9 @@ func (s *Service) healthFor(ctx context.Context, providerRef string) string {
 func (s *Service) health(providerRef string, overrides map[string]bool) string {
 	configured := false
 	disabled := false
-	for i := range s.cfg.Models {
-		if s.cfg.Models[i].ID == providerRef {
-			configured = true
-			disabled = s.cfg.Models[i].Disabled
-			break
-		}
+	if item := s.models.Model(providerRef); item != nil {
+		configured = true
+		disabled = item.Disabled
 	}
 	if !configured {
 		return HealthUnavailable

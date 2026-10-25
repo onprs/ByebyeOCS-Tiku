@@ -105,6 +105,24 @@ try {
   await evaluate(`(() => {const field=document.querySelector('dialog input[name=display_name]');field.value='浏览器核对公开模型';})()`);
   await click('保存');
   await wait(`!document.querySelector('dialog') && document.querySelector('#page')?.textContent.includes('浏览器核对公开模型')`);
+  await click('新增上游模型');
+  await wait(`!!document.querySelector('dialog input[name=id]')`);
+  await evaluate(`(() => {
+    const set=(name,value)=>{const input=document.querySelector('dialog [name='+name+']');input.value=value;};
+    set('id','browser-model');set('display_name','浏览器上游模型');set('base_url','https://models.example.com/v1');
+    set('upstream_model','browser-upstream');set('api_key','browser-secret-key');
+  })()`);
+  await click('添加模型');
+  await wait(`document.querySelector('#page')?.textContent.includes('浏览器上游模型') && !document.querySelector('dialog')`);
+  await evaluate(`(() => {
+    const card=[...document.querySelectorAll('.model-grid .card')].find(value=>value.textContent.includes('browser-model'));
+    if(!card)throw new Error('新增模型卡片缺失');
+    const button=[...card.querySelectorAll('button')].find(value=>value.textContent.trim()==='删除模型');
+    if(!button)throw new Error('新增模型缺少删除操作');button.click();
+  })()`);
+  await wait(`!!document.querySelector('dialog')`);
+  await evaluate(`document.querySelector('dialog .dialog-footer button.danger')?.click()`);
+  await wait(`!document.querySelector('#page')?.textContent.includes('browser-model')`);
   await click('功能测试');
   await wait(`!!document.querySelector('dialog')`);
   assert.equal(await evaluate(`[...document.querySelectorAll('dialog button')].find(value=>value.textContent==='开始测试').disabled`), true, '功能测试未经确认就可发起');

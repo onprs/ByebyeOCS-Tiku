@@ -22,6 +22,7 @@ import (
 	"github.com/onprs/OCS-Tiku/internal/platform/config"
 	"github.com/onprs/OCS-Tiku/internal/platform/httpapi"
 	"github.com/onprs/OCS-Tiku/internal/platform/modelclient"
+	"github.com/onprs/OCS-Tiku/internal/platform/models"
 	"github.com/onprs/OCS-Tiku/internal/platform/panel"
 	"github.com/onprs/OCS-Tiku/internal/platform/store"
 )
@@ -79,22 +80,9 @@ func loadSecrets(cfg *config.Config) (string, map[string]string, error) {
 	if len(token) < 32 {
 		return "", nil, errors.New("服务令牌至少需要 32 个字符")
 	}
-	keys := make(map[string]string, len(cfg.Models))
-	seen := make(map[string]string, len(cfg.Models))
-	for _, model := range cfg.Models {
-		if model.APIKeyFile == "" {
-			keys[model.ID] = ""
-			continue
-		}
-		key, err := config.ReadSecretFile(model.APIKeyFile)
-		if err != nil {
-			return "", nil, fmt.Errorf("模型条目 %q 的密钥文件不可用", model.ID)
-		}
-		if other, exists := seen[key]; exists {
-			return "", nil, fmt.Errorf("模型条目 %q 与 %q 使用了相同密钥文件", model.ID, other)
-		}
-		seen[key] = model.ID
-		keys[model.ID] = key
+	keys, err := config.LoadModelKeys(cfg.Models)
+	if err != nil {
+		return "", nil, err
 	}
 	return token, keys, nil
 }
@@ -242,10 +230,11 @@ func serve(cfg *config.Config) error {
 			}
 		}
 	}()
-	svc := answer.New(cfg, st, keys, client)
-	handler := httpapi.New(cfg, svc, st, token, logger)
+	registry := models.New(cfg.Models, keys)
+	svc := answer.NewWithRegistry(cfg, st, registry, client)
+	handler := httpapi.New(cfg, svc, st, token, logger, registry)
 	if cfg.Panel.Enabled {
-		maintenance, err := panel.New(cfg, svc, st)
+		maintenance, err := panel.New(cfg, svc, st, registry)
 		if err != nil {
 			return err
 		}

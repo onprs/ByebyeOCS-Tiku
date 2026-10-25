@@ -84,6 +84,8 @@ type Panel struct {
 }
 
 type Config struct {
+	// SourcePath 是实际读取的配置文件路径，仅供维护面板原子回写；不参与 JSON。
+	SourcePath             string  `json:"-"`
 	Listen                 string  `json:"listen"`
 	DatabaseMaxConnections int32   `json:"database_max_connections"`
 	DatabaseDSNFile        string  `json:"database_dsn_file"`
@@ -163,6 +165,7 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, errors.New("配置文件路径无效")
 	}
+	c.SourcePath = absolute
 	directory := filepath.Dir(absolute)
 	for _, field := range []*string{&c.DatabaseDSNFile, &c.ServiceTokenFile, &c.UpstreamCAFile} {
 		if *field != "" && !filepath.IsAbs(*field) {
@@ -328,6 +331,27 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// LoadModelKeys 读取模型密钥文件；非 Ollama 模型必须有可用密钥。
+func LoadModelKeys(items []Model) (map[string]string, error) {
+	keys := make(map[string]string, len(items))
+	for _, model := range items {
+		if model.APIKeyFile == "" {
+			if model.Protocol != engine.ProtocolOllamaChat {
+				return nil, fmt.Errorf("模型条目 %q 缺少密钥文件", model.ID)
+			}
+			keys[model.ID] = ""
+			continue
+		}
+		key, err := ReadSecretFile(model.APIKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("模型条目 %q 的密钥文件不可用", model.ID)
+		}
+		// 同一供应商的多个模型可以复用同一密钥值；每个模型仍使用独立私密文件。
+		keys[model.ID] = key
+	}
+	return keys, nil
 }
 
 // ReadSecretFile 读取密钥或服务令牌文件，限制长度并去除首尾空白。
