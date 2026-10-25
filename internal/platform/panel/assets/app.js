@@ -296,6 +296,8 @@ function requestsTable(items) {
 }
 async function renderOverview(page) {
   const [summary, recent] = await Promise.all([api('/overview'), api('/requests?limit=6')]);
+  const totals = summary.all_time || {};
+  const pricing = summary.pricing || { published: 0, priced: 0 };
   const stats = node('div', 'stats');
   const values = [
     ['近24小时查询', formatNumber(summary.queries), `处理中 ${formatNumber(summary.pending)} · 异常 ${formatNumber(summary.failed)}`],
@@ -309,9 +311,43 @@ async function renderOverview(page) {
     stats.append(stat);
   }
   page.append(stats);
+
+  const usage = node('section', 'card');
+  const usageHeader = node('div', 'card-header');
+  const coverageTone = pricing.published > 0 && pricing.priced === pricing.published ? ' good' : ' warn';
+  usageHeader.append(
+    node('h2', '', '累计用量与定价'),
+    node('span', 'status' + coverageTone, pricing.published === 0 ? '尚未发布模型' : `${pricing.priced} / ${pricing.published} 个已定价`),
+  );
+  usage.append(usageHeader);
+  const usageGrid = detailGrid([
+    ['累计查询', formatNumber(totals.queries)],
+    ['累计缓存命中', formatNumber(totals.cache_hits)],
+    ['累计输入 token', formatNumber(totals.input_tokens)],
+    ['累计输出 token', formatNumber(totals.output_tokens)],
+    ['用量不完整', formatNumber(totals.incomplete)],
+    ['当前有效缓存', `${formatNumber(summary.active_cache)} 条`],
+  ]);
+  usageGrid.classList.add('detail-grid-wide');
+  usage.append(usageGrid);
+  const models = Array.isArray(summary.by_model) ? summary.by_model : [];
+  if (models.length) {
+    usage.append(node('h3', '', '按模型累计'));
+    usage.append(table(['模型', '查询', '缓存命中', '输入 token', '输出 token'], models.map(model => [
+      model.display_name || model.model_id,
+      formatNumber(model.queries),
+      formatNumber(model.cache_hits),
+      formatNumber(model.input_tokens),
+      formatNumber(model.output_tokens),
+    ])));
+  } else {
+    usage.append(node('p', 'muted', '尚无模型用量。'));
+  }
+  page.append(usage);
+
   const card = node('section', 'card');
   const heading = node('div', 'card-header');
-  heading.append(node('h2', '', '最近查询'), node('span', 'small muted', `当前有效缓存 ${formatNumber(summary.active_cache)} 条`));
+  heading.append(node('h2', '', '最近查询'));
   card.append(heading, requestsTable(recent.items));
   page.append(card);
 }

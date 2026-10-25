@@ -96,6 +96,8 @@ try {
   await call('Page.navigate', { url: base + '/panel/#overview' });
   await login('maintainer');
   await navigate('overview', '运行总览');
+  await wait(`document.body.textContent.includes('累计用量与定价')`);
+  assert.equal(await evaluate(`document.body.textContent.includes('按模型累计')`), true, '累计用量缺少按模型明细');
   await screenshot('overview-desktop');
   await navigate('offerings', '模型与价格');
   await wait(`!!document.querySelector('.model-grid')`);

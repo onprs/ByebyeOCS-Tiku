@@ -135,15 +135,49 @@ func (s *Store) PanelCache(ctx context.Context, filter PanelFilter) (PanelPage, 
 
 func (s *Store) PanelOverview(ctx context.Context) (json.RawMessage, error) {
 	var data json.RawMessage
-	err := s.pool.QueryRow(ctx, `SELECT jsonb_build_object(
- 'queries',count(*),'cache_hits',count(*) FILTER(WHERE cache_hit),
- 'incomplete',count(*) FILTER(WHERE usage->>'complete' IS DISTINCT FROM 'true'),
- 'input_tokens',COALESCE(sum(CASE WHEN usage->>'input_tokens' ~ '^[0-9]+$' THEN (usage->>'input_tokens')::bigint END),0),
- 'output_tokens',COALESCE(sum(CASE WHEN usage->>'output_tokens' ~ '^[0-9]+$' THEN (usage->>'output_tokens')::bigint END),0),
+	err := s.pool.QueryRow(ctx, `WITH recent AS (
+ SELECT count(*) AS queries,
+        count(*) FILTER(WHERE cache_hit) AS cache_hits,
+        count(*) FILTER(WHERE usage->>'complete' IS DISTINCT FROM 'true') AS incomplete,
+        COALESCE(sum(CASE WHEN usage->>'input_tokens' ~ '^[0-9]+$' THEN (usage->>'input_tokens')::bigint END),0) AS input_tokens,
+        COALESCE(sum(CASE WHEN usage->>'output_tokens' ~ '^[0-9]+$' THEN (usage->>'output_tokens')::bigint END),0) AS output_tokens
+ FROM tiku.queries WHERE created_at>=now()-interval '24 hours'
+), total AS (
+ SELECT count(*) AS queries,
+        count(*) FILTER(WHERE cache_hit) AS cache_hits,
+        count(*) FILTER(WHERE usage->>'complete' IS DISTINCT FROM 'true') AS incomplete,
+        COALESCE(sum(CASE WHEN usage->>'input_tokens' ~ '^[0-9]+$' THEN (usage->>'input_tokens')::bigint END),0) AS input_tokens,
+        COALESCE(sum(CASE WHEN usage->>'output_tokens' ~ '^[0-9]+$' THEN (usage->>'output_tokens')::bigint END),0) AS output_tokens
+ FROM tiku.queries
+), by_model AS (
+ SELECT q.offering_id AS model_id,
+        COALESCE(NULLIF(o.display_name,''),q.offering_id) AS display_name,
+        count(*) AS queries,
+        count(*) FILTER(WHERE q.cache_hit) AS cache_hits,
+        COALESCE(sum(CASE WHEN q.usage->>'input_tokens' ~ '^[0-9]+$' THEN (q.usage->>'input_tokens')::bigint END),0) AS input_tokens,
+        COALESCE(sum(CASE WHEN q.usage->>'output_tokens' ~ '^[0-9]+$' THEN (q.usage->>'output_tokens')::bigint END),0) AS output_tokens
+ FROM tiku.queries q LEFT JOIN tiku.offerings o ON o.public_id=q.offering_id
+ GROUP BY q.offering_id,o.display_name
+), coverage AS (
+ SELECT count(*) AS published,
+        count(*) FILTER(WHERE pricing IS NOT NULL AND pricing->>'input_micros_per_million_tokens' IS NOT NULL) AS priced
+ FROM tiku.offerings WHERE enabled
+)
+SELECT jsonb_build_object(
+ 'queries',(SELECT queries FROM recent),
+ 'cache_hits',(SELECT cache_hits FROM recent),
+ 'incomplete',(SELECT incomplete FROM recent),
+ 'input_tokens',(SELECT input_tokens FROM recent),
+ 'output_tokens',(SELECT output_tokens FROM recent),
+ 'all_time',(SELECT jsonb_build_object('queries',queries,'cache_hits',cache_hits,'incomplete',incomplete,
+   'input_tokens',input_tokens,'output_tokens',output_tokens) FROM total),
+ 'by_model',COALESCE((SELECT jsonb_agg(jsonb_build_object('model_id',model_id,'display_name',display_name,
+   'queries',queries,'cache_hits',cache_hits,'input_tokens',input_tokens,'output_tokens',output_tokens)
+   ORDER BY queries DESC,model_id) FROM by_model),'[]'::jsonb),
+ 'pricing',(SELECT jsonb_build_object('published',published,'priced',priced) FROM coverage),
  'pending',(SELECT count(*) FROM tiku.requests WHERE state='pending' AND created_at>=now()-interval '24 hours'),
  'failed',(SELECT count(*) FROM tiku.requests WHERE state IN ('failed','unknown') AND created_at>=now()-interval '24 hours'),
- 'active_cache',(SELECT count(*) FROM tiku.cache_entries WHERE invalidated_at IS NULL AND expires_at>now()))
- FROM tiku.queries WHERE created_at>=now()-interval '24 hours'`).Scan(&data)
+ 'active_cache',(SELECT count(*) FROM tiku.cache_entries WHERE invalidated_at IS NULL AND expires_at>now()))`).Scan(&data)
 	return data, err
 }
 
