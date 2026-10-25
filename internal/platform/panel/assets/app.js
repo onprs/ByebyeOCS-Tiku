@@ -348,7 +348,7 @@ async function renderOverview(page) {
   const card = node('section', 'card');
   const heading = node('div', 'card-header');
   heading.append(node('h2', '', '最近查询'));
-  card.append(heading, requestsTable(recent.items));
+  card.append(heading, recent.items.length ? requestsTable(recent.items) : node('p', 'muted', '暂无查询记录。'));
   page.append(card);
 }
 function modelTest(model, functional) {
