@@ -146,6 +146,7 @@ function renderLogin() {
   });
   card.append(form);
   wrapper.append(card);
+  wrapper.append(node('p', 'login-footer', `© ${new Date().getFullYear()} ByebyeOCS · 版权所有 · Created by onprs`));
   root.append(wrapper);
 }
 function renderShell() {
@@ -178,7 +179,9 @@ function renderShell() {
   top.append(account);
   const main = node('main', 'page');
   main.id = 'page';
-  workspace.append(top, main);
+  const footer = node('footer', 'site-footer');
+  footer.append(node('span', '', `© ${new Date().getFullYear()} ByebyeOCS · 版权所有`), node('span', '', 'Created by onprs'));
+  workspace.append(top, main, footer);
   shell.append(sidebar, workspace);
   root.append(shell);
   loadPage();
