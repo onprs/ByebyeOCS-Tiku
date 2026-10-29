@@ -272,6 +272,92 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if status, _, data := request(client, "GET", "/panel/api/models", "", nil, nil); status != 200 || strings.Contains(string(data), "panel-model") {
 		t.Fatal("删除后的模型仍在列表", status, string(data))
 	}
+	provider := map[string]any{"id": "panel-provider", "name": "测试提供商", "protocol": "openai-chat", "base_url": f.llm.server.URL + "/v1", "api_key": "provider-private-key"}
+	if status, _, _ := request(viewer, "POST", "/panel/api/providers", viewerCSRF, provider, nil); status != 403 {
+		t.Fatal("只读账号新增了提供商")
+	}
+	if status, _, data := request(client, "POST", "/panel/api/providers", csrf, provider, nil); status != 201 {
+		t.Fatal("新增提供商失败", status, string(data))
+	}
+	for _, id := range []string{"shared-model-one", "shared-model-two"} {
+		model := map[string]any{"id": id, "provider_id": "panel-provider", "display_name": id, "upstream_model": "fake-answer"}
+		if status, _, data := request(client, "POST", "/panel/api/upstream-models", csrf, model, nil); status != 201 {
+			t.Fatal("新增关联模型失败", status, string(data))
+		}
+	}
+	if status, _, data := request(client, "GET", "/panel/api/providers", "", nil, nil); status != 200 || !bytes.Contains(data, []byte(`"model_count":2`)) || bytes.Contains(data, []byte("provider-private-key")) || bytes.Contains(data, []byte("api_key_file")) {
+		t.Fatal("提供商列表或密钥保护异常", status, string(data))
+	}
+	if status, _, _ := request(client, "DELETE", "/panel/api/providers/panel-provider", csrf, nil, nil); status != 409 {
+		t.Fatal("仍被引用的提供商应拒绝删除")
+	}
+	retiredBody := offeringBody("1000000")
+	retiredBody["provider_ref"], retiredBody["enabled"], retiredBody["is_default"] = "shared-model-one", false, false
+	status, _, retiredData := request(client, "POST", "/panel/api/offerings", csrf, retiredBody, nil)
+	var retired struct {
+		PublicID string `json:"public_id"`
+		Version  int64  `json:"version"`
+	}
+	if status != 201 || json.Unmarshal(retiredData, &retired) != nil {
+		t.Fatal("创建已下架条目失败", status, string(retiredData))
+	}
+	if status, _, _ := request(client, "DELETE", "/panel/api/upstream-models/shared-model-one", csrf, nil, nil); status != 409 {
+		t.Fatal("已下架条目仍在引用时不得删除模型")
+	}
+	retiredBody["provider_ref"], retiredBody["version"] = "standard", retired.Version
+	if status, _, data := request(client, "PATCH", "/panel/api/offerings/"+retired.PublicID, csrf, retiredBody, nil); status != 200 {
+		t.Fatal("重新关联公开条目失败", status, string(data))
+	}
+	for _, id := range []string{"shared-model-one", "shared-model-two"} {
+		queryID := "provider-query-" + id
+		input := v2Request("提供商模型题", "A. 甲", "always_llm", queryID, queryID, nil)
+		input.ModelOfferingID = id
+		if result := decodeResponse(t, answerV2(t, f, input, queryID)); result.Answer != "A" {
+			t.Fatal("提供商模型没有正常作答")
+		}
+		if status, _, data := request(client, "DELETE", "/panel/api/upstream-models/"+id, csrf, nil, nil); status != 200 {
+			t.Fatal("删除关联模型失败", status, string(data))
+		}
+	}
+	if status, _, data := request(client, "DELETE", "/panel/api/providers/panel-provider", csrf, nil, nil); status != 200 {
+		t.Fatal("删除空提供商失败", status, string(data))
+	}
+	// 新默认项会改变原默认项的版本，避免过期表单覆盖并发修改。
+	firstStatus, _, firstData := request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil)
+	if firstStatus != 201 {
+		t.Fatal("新增默认条目失败", firstStatus, string(firstData))
+	}
+	var first struct {
+		PublicID string `json:"public_id"`
+		Version  int64  `json:"version"`
+	}
+	if err := json.Unmarshal(firstData, &first); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, data := request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil); status != 201 {
+		t.Fatal("切换默认条目失败", status, string(data))
+	}
+	stale := offeringBody("1000000")
+	stale["version"] = first.Version
+	if status, _, _ := request(client, "PATCH", "/panel/api/offerings/"+first.PublicID, csrf, stale, nil); status != 409 {
+		t.Fatal("旧默认条目的过期版本没有被拒绝")
+	}
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM tiku.panel_audit WHERE action='offering.create'`).Scan(&count); err != nil || count != 4 {
+		t.Fatal("公开条目与审计未一起保存", count, err)
+	}
+	if _, err := f.pool.Exec(context.Background(), `ALTER TABLE tiku.panel_audit ADD CONSTRAINT fixture_reject_audit CHECK (false) NOT VALID`); err != nil {
+		t.Fatal(err)
+	}
+	blocked := map[string]any{"id": "blocked-provider", "name": "不可写入", "protocol": "openai-chat", "base_url": f.llm.server.URL + "/v1", "api_key": "blocked-key"}
+	if status, _, _ := request(client, "POST", "/panel/api/providers", csrf, blocked, nil); status != 503 {
+		t.Fatal("审计不可用时不应改写提供商", status)
+	}
+	if _, err := f.pool.Exec(context.Background(), `ALTER TABLE tiku.panel_audit DROP CONSTRAINT fixture_reject_audit`); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, data := request(client, "GET", "/panel/api/providers", "", nil, nil); status != 200 || bytes.Contains(data, []byte("blocked-provider")) {
+		t.Fatal("审计失败后提供商配置仍被修改", status, string(data))
+	}
 	if status, _, _ := request(client, "POST", "/panel/api/logout", csrf, map[string]any{}, nil); status != 200 {
 		t.Fatal("无法退出维护会话")
 	}

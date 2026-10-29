@@ -28,8 +28,8 @@ const navigation = [
   ['settings', '设置', 'M12 8a4 4 0 1 0 0 8a4 4 0 0 0 0-8 M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2'],
 ];
 const statusLabels = { answered: '已回答', cache_hit: '缓存命中', usage_incomplete: '用量不完整', pending: '处理中', completed: '已完成', failed: '失败', unknown: '结果待核对', active: '有效', expired: '已过期', invalidated: '已失效' };
-const errorLabels = { rate_limited: '上游请求受限', upstream_timeout: '上游响应超时', empty_answer: '模型返回空答案', model_disabled: '模型已停用', usage_incomplete: '用量不完整', request_cancelled: '请求已取消', model_unavailable: '模型暂不可用' };
-const actionLabels = { 'session.login': '登录', 'session.logout': '退出登录', 'model.state': '调整模型状态', 'model.test.request': '开始模型测试', 'model.test.result': '模型测试结束', 'offering.create': '发布公开条目', 'offering.update': '更新公开条目', 'offering.retire': '停用公开条目', 'offering.test.request': '开始公开条目测试', 'offering.test.result': '公开条目测试结束', 'cache.invalidate': '使缓存失效' };
+const errorLabels = { unsupported_protocol: '该协议不支持无用量连通测试', rate_limited: '上游请求受限', upstream_rate_limited: '上游请求受限', model_auth_failed: '模型服务认证失败', response_too_large: '模型响应超过大小上限', upstream_timeout: '上游响应超时', empty_answer: '模型返回空答案', model_disabled: '模型已停用', usage_incomplete: '用量不完整', request_cancelled: '请求已取消', model_unavailable: '模型暂不可用' };
+const actionLabels = { 'provider.create.request': '尝试新增提供商', 'provider.update.request': '尝试更新提供商', 'provider.delete.request': '尝试删除提供商', 'upstream_model.create.request': '尝试新增模型', 'upstream_model.update.request': '尝试更新模型', 'upstream_model.delete.request': '尝试删除模型', 'provider.create': '新增提供商', 'provider.update': '更新提供商', 'provider.delete': '删除提供商', 'upstream_model.create': '新增模型', 'upstream_model.update': '更新模型', 'upstream_model.delete': '删除模型', 'session.login': '登录', 'session.logout': '退出登录', 'model.state': '调整模型状态', 'model.test.request': '开始模型测试', 'model.test.result': '模型测试结束', 'offering.create': '发布公开条目', 'offering.update': '更新公开条目', 'offering.retire': '停用公开条目', 'offering.test.request': '开始公开条目测试', 'offering.test.result': '公开条目测试结束', 'cache.invalidate': '使缓存失效' };
 const pageState = new Map();
 const formatNumber = value => value == null ? '—' : Number(value).toLocaleString('zh-CN');
 const formatTime = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -58,13 +58,16 @@ function button(label, action, className = '') {
   const element = node('button', className, label);
   element.type = 'button';
   element.addEventListener('click', async () => {
+    if (element.getAttribute('aria-busy') === 'true') return;
     const menu = element.closest('details');
     if (menu) menu.open = false;
-    const result = action(element);
-    if (result && typeof result.then === 'function') {
-      markButtonBusy(element, true);
-      try { await result; } finally { markButtonBusy(element, false); }
-    }
+    try {
+      const result = action(element);
+      if (result && typeof result.then === 'function') {
+        markButtonBusy(element, true);
+        try { await result; } finally { markButtonBusy(element, false); }
+      }
+    } catch (error) { notify(error.message || '操作未完成', true); }
   });
   return element;
 }
@@ -80,6 +83,9 @@ function notify(message, bad = false) {
   notices.append(element);
   while (notices.childElementCount > 3) notices.firstElementChild.remove();
   setTimeout(() => element.remove(), 5000);
+}
+function notifyConfigResult(value, message) {
+  notify(value.audit_pending ? message + '，操作记录待核对' : message, !!value.audit_pending);
 }
 async function api(path, options = {}) {
   const headers = { Accept: 'application/json', ...options.headers };
@@ -199,7 +205,7 @@ function detailGrid(entries) {
   return element;
 }
 function table(headers, rows) {
-  if (!rows.length) return node('div', 'card empty', '暂无记录');
+  if (!rows.length) return node('div', 'empty empty-surface', '暂无记录');
   const wrapper = node('div', 'table-wrap');
   const element = node('table');
   const head = node('thead');
@@ -315,7 +321,7 @@ async function renderOverview(page) {
   }
   page.append(stats);
 
-  const usage = node('section', 'card');
+  const usage = node('section', 'overview-section');
   const usageHeader = node('div', 'card-header');
   const coverageTone = pricing.published > 0 && pricing.priced === pricing.published ? ' good' : ' warn';
   usageHeader.append(
@@ -348,7 +354,7 @@ async function renderOverview(page) {
   }
   page.append(usage);
 
-  const card = node('section', 'card');
+  const card = node('section', 'overview-section');
   const heading = node('div', 'card-header');
   heading.append(node('h2', '', '最近查询'));
   card.append(heading, recent.items.length ? requestsTable(recent.items) : node('p', 'muted', '暂无查询记录。'));
@@ -405,6 +411,7 @@ const parseYuanMicros = raw => {
 };
 const formatTokenPrice = value => value == null ? '未定价' : microsToYuanInput(value) + ' 元 / 百万 token';
 function offeringStatus(model, offering, orphan) {
+  if (offering && !offering.enabled) return { text: '已下架', tone: '' };
   if (orphan) return { text: '模型已移除', tone: ' bad' };
   if (model.locked) return { text: '配置停用', tone: ' bad' };
   if (!model.enabled) return { text: '模型已停用', tone: ' warn' };
@@ -422,7 +429,7 @@ function offeringCard(model, offering, settings, orphan = false) {
   const tags = node('div', 'model-meta');
   for (const capability of (offering ? offering.capabilities : model.capabilities)) tags.append(node('span', 'status', capabilityLabels[capability] || capability));
   if (offering?.is_default) tags.append(node('span', 'status', '默认模型'));
-  if (offering) tags.append(node('span', 'status' + (offering.health === 'unavailable' ? ' bad' : ' good'), offering.health === 'unavailable' ? '模型不可用' : '模型可用'));
+  if (offering) tags.append(node('span', 'status' + (offering.health === 'unavailable' ? ' bad' : ''), offering.health === 'unavailable' ? '模型不可用' : '已配置'));
   card.append(tags);
   if (offering) {
     const summary = node('div', 'model-pricing');
@@ -439,39 +446,26 @@ function offeringCard(model, offering, settings, orphan = false) {
   } else {
     card.append(node('p', 'muted', '尚未发布公开条目；用户不能选择此模型。'));
   }
-  if (orphan) {
-    card.append(node('p', 'muted', '模型配置已移除，当前条目不可用。'));
-    if (session.role === 'maintainer' && offering) {
-      card.append(button('停用条目', async element => {
-        element.disabled = true;
-        try {
-          await api('/offerings/' + encodeURIComponent(offering.public_id) + '/retirements', { method: 'POST', body: JSON.stringify({ version: offering.version }) });
-          notify('公开条目已停用');
-          loadPage();
-        } catch (error) { notify(error.message, true); element.disabled = false; }
-      }));
-    }
-  } else if (session.role === 'maintainer') {
-    const actions = node('div', 'actions model-actions');
-    actions.append(button(offering ? '编辑' : '发布', () => offeringDialog(offering, model, settings)));
-    actions.append(button('编辑配置', () => upstreamModelDialog(model)));
-    const menu = node('details', 'row-menu');
-    menu.append(node('summary', '', '更多操作'));
-    const options = node('div');
-    options.append(button('模型详情', () => modelDetailsDialog(model, offering)), button('连通测试', () => modelTest(model, false)), button('功能测试', () => modelTest(model, true)));
-    const toggle = button(model.enabled ? '停用' : '启用', async element => {
-      element.disabled = true;
-      try { await api('/models/' + encodeURIComponent(model.id), { method: 'PATCH', body: JSON.stringify({ enabled: !model.enabled }) }); notify('模型状态已更新'); loadPage(); } catch (error) { notify(error.message, true); element.disabled = false; }
-    });
-    toggle.disabled = model.locked;
-    options.append(toggle, button('删除模型', () => deleteModelDialog(model), 'danger'));
-    menu.append(options);
-    actions.append(menu);
-    card.append(actions);
-  } else {
-    card.append(button('模型详情', () => modelDetailsDialog(model, offering)));
+  if (orphan) card.append(node('p', 'muted', '关联模型已移除'));
+  const actions = node('div', 'actions model-actions');
+  actions.append(button('详情', () => modelDetailsDialog(model, offering)));
+  if (session.role === 'maintainer') {
+    actions.append(button('编辑', () => offeringDialog(offering, model, settings)));
+    if (offering.enabled) actions.append(button('下架', () => retireOfferingDialog(offering)));
   }
+  card.append(actions);
   return card;
+}
+function retireOfferingDialog(offering) {
+  const dialog = openDialog('下架公开模型');
+  const error = node('p', 'form-error'); error.setAttribute('role', 'alert');
+  dialog.content.append(node('p', '', '确定下架 ' + offering.display_name + '？'), error);
+  dialog.footer.append(button('取消', () => dialog.close()), button('确认下架', async () => {
+    try {
+      await api('/offerings/' + encodeURIComponent(offering.public_id) + '/retirements', { method: 'POST', body: JSON.stringify({ version: offering.version }) });
+      dialog.close(); notify('公开条目已下架'); loadPage();
+    } catch (failure) { error.textContent = failure.message; }
+  }, 'danger'));
 }
 function modelDetailsDialog(model, offering) {
   const dialog = openDialog('模型详情', true);
@@ -486,35 +480,133 @@ function modelDetailsDialog(model, offering) {
     ['最近测试', model.last_test ? formatTime(model.last_test.created_at) : '尚未测试'],
   ]));
 }
-async function renderOfferings(page) {
-  const [offeringData, modelData, settings] = await Promise.all([api('/offerings'), api('/models'), api('/settings')]);
-  const models = modelData.items;
-  if (!models.length) {
-    const empty = node('div', 'card empty');
-    empty.append(node('p', '', '尚未配置上游模型。'), session.role === 'maintainer' ? button('新增上游模型', () => upstreamModelDialog(null), 'primary') : node('span', '', '请联系维护员配置上游模型。'));
-    page.append(empty);
-    return;
-  }
-  const byProvider = new Map(offeringData.items.map(item => [item.provider_ref, item]));
-  const ordered = [...models].sort((a, b) => {
-    const left = byProvider.get(a.id), right = byProvider.get(b.id);
-    if (left && right) return (left.sort_order - right.sort_order) || left.public_id.localeCompare(right.public_id);
-    if (left) return -1;
-    if (right) return 1;
-    return a.id.localeCompare(b.id);
+let modelTab = 'models';
+function providerDialog(provider) {
+  const isNew = !provider;
+  const dialog = openDialog(isNew ? '新增提供商' : '编辑提供商', true);
+  const form = node('form');
+  const id = input('text', 'id'); id.value = provider?.id ?? ''; id.disabled = !isNew;
+  const name = input('text', 'name'); name.value = provider?.name ?? '';
+  const vendor = input('text', 'vendor'); vendor.required = false; vendor.value = provider?.vendor ?? '';
+  const protocol = select('接入协议', Object.entries(protocolLabels), provider?.protocol ?? 'openai-chat', () => {});
+  const address = input('url', 'base_url'); address.value = provider?.base_url ?? ''; address.placeholder = 'https://api.example.com/v1';
+  const key = input('password', 'api_key', 'new-password'); key.required = false;
+  key.placeholder = isNew ? '请输入密钥' : '地址和协议不变时留空保留';
+  const error = node('p', 'form-error'); error.setAttribute('role', 'alert');
+  const submit = node('button', 'primary', isNew ? '添加提供商' : '保存提供商'); submit.type = 'submit';
+  form.append(formSection('提供商', field('提供商标识', id), field('名称', name), field('厂商标识（可选）', vendor)),
+    formSection('连接', field('接入协议', protocol), field('接口地址', address), field('API 密钥', key)), error);
+  formActions(dialog, form, submit);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    error.textContent = '';
+    submit.disabled = true;
+    try {
+      const payload = { name: name.value.trim(), vendor: vendor.value.trim(), protocol: protocol.value, base_url: address.value.trim(), api_key: key.value.trim() };
+      if (isNew) payload.id = id.value.trim();
+      const result = await api(isNew ? '/providers' : '/providers/' + encodeURIComponent(provider.id), { method: isNew ? 'POST' : 'PATCH', body: JSON.stringify(payload) });
+      dialog.close(); notifyConfigResult(result, isNew ? '提供商已添加' : '提供商已更新'); loadPage();
+    } catch (failure) { error.textContent = failure.message; submit.disabled = false; }
   });
-  const grid = node('div', 'model-grid');
-  const configured = new Set(models.map(model => model.id));
-  for (const model of ordered) grid.append(offeringCard(model, byProvider.get(model.id) || null, settings));
-  for (const offering of offeringData.items) {
-    if (configured.has(offering.provider_ref)) continue;
-    grid.append(offeringCard({ id: offering.provider_ref, display_name: offering.display_name, capabilities: offering.capabilities,
-      enabled: false, locked: true, protocol: '', last_test: null }, offering, settings, true));
-  }
-  page.append(grid);
+  dialog.content.append(form);
 }
-function upstreamModelDialog(model) {
+function deleteProviderDialog(provider) {
+  const dialog = openDialog('删除提供商');
+  const error = node('p', 'form-error'); error.setAttribute('role', 'alert');
+  dialog.content.append(node('p', '', '确定删除 ' + provider.name + '？'), error);
+  dialog.footer.append(button('取消', () => dialog.close()), button('删除提供商', async () => {
+    try {
+      const result = await api('/providers/' + encodeURIComponent(provider.id), { method: 'DELETE' });
+      dialog.close(); notifyConfigResult(result, '提供商已删除'); loadPage();
+    } catch (failure) { error.textContent = failure.message; }
+  }, 'danger'));
+}
+function providerCard(provider) {
+  const card = node('section', 'card provider-row');
+  const title = node('div', 'model-name');
+  title.append(node('h3', '', provider.name), node('span', 'status', protocolLabels[provider.protocol] || provider.protocol));
+  const meta = node('div', 'provider-meta');
+  meta.append(node('span', 'mono muted', provider.id), node('span', 'muted', provider.model_count + ' 个模型'),
+    node('span', 'muted', provider.key_configured ? '密钥已配置' : '无密钥'));
+  card.append(title, meta, node('div', 'mono muted provider-address', provider.base_url));
+  if (session.role === 'maintainer') {
+    const actions = node('div', 'actions model-actions');
+    actions.append(button('编辑提供商', () => providerDialog(provider)), button('删除', () => deleteProviderDialog(provider), 'danger'));
+    card.append(actions);
+  }
+  return card;
+}
+function upstreamCard(model, offerings, providers, settings) {
+  const card = node('section', 'card');
+  const title = node('div', 'model-name');
+  const state = model.locked ? { text: '配置停用', tone: ' bad' } : model.enabled ? { text: '已启用', tone: ' good' } : { text: '已停用', tone: ' warn' };
+  title.append(node('h3', '', model.display_name), node('span', 'status' + state.tone, state.text));
+  const provider = providers.find(item => item.id === model.provider_id);
+  card.append(title, node('div', 'mono muted', model.id + ' · ' + (provider?.name || '独立连接')));
+  const meta = node('div', 'model-meta');
+  meta.append(node('span', 'status', protocolLabels[model.protocol] || model.protocol));
+  for (const capability of model.capabilities) meta.append(node('span', 'status', capabilityLabels[capability] || capability));
+  card.append(meta, node('div', 'model-pricing muted', `${offerings} 个公开条目 · ${model.upstream_model}`));
+  if (session.role === 'maintainer') {
+    const actions = node('div', 'actions model-actions');
+    actions.append(button('发布', () => offeringDialog(null, model, settings)), button('编辑配置', () => upstreamModelDialog(model)));
+    const menu = node('details', 'row-menu'); menu.append(node('summary', '', '更多操作'));
+    const options = node('div');
+    options.append(button('模型详情', () => modelDetailsDialog(model, null)), button('连通测试', () => modelTest(model, false)), button('功能测试', () => modelTest(model, true)));
+    const toggle = button(model.enabled ? '停用' : '启用', async () => {
+      await api('/models/' + encodeURIComponent(model.id), { method: 'PATCH', body: JSON.stringify({ enabled: !model.enabled }) });
+      notify('模型状态已更新'); loadPage();
+    });
+    toggle.disabled = model.locked;
+    options.append(toggle, button('删除模型', () => deleteModelDialog(model), 'danger'));
+    menu.append(options); actions.append(menu); card.append(actions);
+  } else card.append(button('模型详情', () => modelDetailsDialog(model, null)));
+  return card;
+}
+async function renderOfferings(page) {
+  const [offeringData, modelData, providerData] = await Promise.all([api('/offerings'), api('/models'), api('/providers')]);
+  const models = modelData.items, providers = providerData.items, offerings = offeringData.items;
+  const tabs = node('div', 'section-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '模型管理');
+  const choices = [['models', '模型', models.length], ['providers', '提供商', providers.length], ['public', '公开价格', offerings.length]];
+  for (const [index, [value, label, count]] of choices.entries()) {
+    const tab = button(label + ' ' + count, () => { modelTab = value; loadPage(); });
+    tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(modelTab === value));
+    tab.tabIndex = modelTab === value ? 0 : -1;
+    tab.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + choices.length) % choices.length;
+      modelTab = choices[next][0];
+      loadPage().then(() => document.querySelector('#page [role=tab][aria-selected=true]')?.focus());
+    });
+    tabs.append(tab);
+  }
+  page.append(tabs);
+  const toolbar = node('div', 'section-toolbar');
+  toolbar.append(node('h2', '', modelTab === 'models' ? '模型' : modelTab === 'providers' ? '提供商' : '公开价格'));
+  if (session.role === 'maintainer' && modelTab === 'providers') toolbar.append(button('新增提供商', () => providerDialog(null), 'primary'));
+  if (session.role === 'maintainer' && modelTab === 'models') toolbar.append(button('新增上游模型', () => upstreamModelDialog(null), 'primary'));
+  page.append(toolbar);
+  const grid = node('div', 'model-grid');
+  if (modelTab === 'providers') for (const provider of providers) grid.append(providerCard(provider));
+  if (modelTab === 'models') {
+    const grouped = new Map();
+    for (const item of offerings) grouped.set(item.provider_ref, (grouped.get(item.provider_ref) || 0) + 1);
+    for (const model of models) grid.append(upstreamCard(model, grouped.get(model.id) || 0, providers, offeringData));
+  }
+  if (modelTab === 'public') for (const offering of offerings) {
+    const model = models.find(item => item.id === offering.provider_ref);
+    grid.append(offeringCard(model || { id: offering.provider_ref, display_name: offering.display_name, capabilities: offering.capabilities,
+      enabled: false, locked: true, protocol: '', last_test: null }, offering, offeringData, !model));
+  }
+  if (grid.childElementCount) page.append(grid);
+  else page.append(node('div', 'empty empty-surface', modelTab === 'providers' ? '尚未配置提供商' : modelTab === 'models' ? '尚未配置模型' : '尚未发布公开条目'));
+}
+async function upstreamModelDialog(model) {
   const isNew = !model;
+  const providers = (await api('/providers')).items;
+  if (isNew && !providers.length) { providerDialog(null); return; }
   const dialog = openDialog(isNew ? '新增上游模型' : '编辑上游模型', true);
   const form = node('form');
   const id = input('text', 'id');
@@ -523,6 +615,8 @@ function upstreamModelDialog(model) {
   id.disabled = !isNew;
   const displayName = input('text', 'display_name');
   displayName.value = model?.display_name ?? '';
+  const providerChoices = [['', isNew ? '选择提供商' : '原有独立连接'], ...providers.map(item => [item.id, item.name])];
+  const provider = select('提供商', providerChoices, model?.provider_id ?? '', () => updateConnection());
   const protocol = select('接入协议', [['openai-chat', 'OpenAI 兼容'], ['anthropic-messages', 'Anthropic'], ['gemini-generate-content', 'Gemini'], ['ollama-chat', 'Ollama']], model?.protocol ?? 'openai-chat', () => { });
   const vendor = input('text', 'vendor');
   vendor.required = false;
@@ -570,13 +664,17 @@ function upstreamModelDialog(model) {
   error.setAttribute('role', 'alert');
   const submit = node('button', 'primary', isNew ? '添加模型' : '保存模型');
   submit.type = 'submit';
+  const connection = formSection('独立连接', field('接入协议', protocol), field('接口地址', baseURL),
+    field('厂商标识（可选）', vendor), field('API 密钥', apiKey));
+  function updateConnection() {
+    connection.hidden = !!provider.value || isNew;
+    baseURL.required = !connection.hidden;
+  }
+  updateConnection();
   form.append(
     formSection('基本信息',
-      field('模型标识', id), field('显示名称', displayName), field('供应商（可选）', vendor)),
-    formSection('上游连接',
-      field('接入协议', protocol), field('接口地址', baseURL),
-      field('上游模型名', upstreamModel), field('API 密钥', apiKey),
-      node('p', 'field-hint', '使用 HTTPS 接口地址。密钥保存后不会回显，编辑时留空保留原密钥。')),
+      field('模型标识', id), field('显示名称', displayName), field('提供商', provider), field('上游模型名', upstreamModel)),
+    connection,
     formSection('模型能力',
       makeCheck(vision, '支持图片输入'), makeCheck(toolCall, '支持工具调用'),
       makeCheck(reasoning, '支持推理内容'), field('上下文长度', context),
@@ -595,13 +693,11 @@ function upstreamModelDialog(model) {
       if (isNew && !id.value.trim()) throw new Error('请填写模型标识');
       if (!displayName.value.trim()) throw new Error('请填写显示名称');
       if (!upstreamModel.value.trim()) throw new Error('请填写上游模型名');
-      if (!baseURL.value.trim()) throw new Error('请填写接口地址');
-      if (protocolValue !== 'ollama-chat' && isNew && !apiKey.value.trim()) throw new Error('请填写 API 密钥');
+      if (isNew && !provider.value) throw new Error('请选择提供商');
+      if (!provider.value && !baseURL.value.trim()) throw new Error('请填写接口地址');
       const payload = {
+        provider_id: provider.value,
         display_name: displayName.value.trim(),
-        protocol: protocolValue,
-        vendor: vendor.value.trim(),
-        base_url: baseURL.value.trim(),
         upstream_model: upstreamModel.value.trim(),
         vision: vision.checked,
         tool_call: toolCall.checked,
@@ -611,11 +707,16 @@ function upstreamModelDialog(model) {
         disabled: !enabled.checked,
         is_caption: caption.checked,
       };
-      if (apiKey.value.trim()) payload.api_key = apiKey.value.trim();
+      if (!provider.value) {
+        payload.protocol = protocolValue;
+        payload.vendor = vendor.value.trim();
+        payload.base_url = baseURL.value.trim();
+        if (apiKey.value.trim()) payload.api_key = apiKey.value.trim();
+      }
       if (isNew) payload.id = id.value.trim();
-      await api(isNew ? '/upstream-models' : '/upstream-models/' + encodeURIComponent(model.id), { method: isNew ? 'POST' : 'PATCH', body: JSON.stringify(payload) });
+      const result = await api(isNew ? '/upstream-models' : '/upstream-models/' + encodeURIComponent(model.id), { method: isNew ? 'POST' : 'PATCH', body: JSON.stringify(payload) });
       dialog.close();
-      notify(isNew ? '上游模型已添加' : '上游模型已更新');
+      notifyConfigResult(result, isNew ? '上游模型已添加' : '上游模型已更新');
       loadPage();
     } catch (failure) {
       error.textContent = failure.message;
@@ -633,9 +734,9 @@ function deleteModelDialog(model) {
   const submit = button('删除模型', async element => {
     element.disabled = true;
     try {
-      await api('/upstream-models/' + encodeURIComponent(model.id), { method: 'DELETE' });
+      const result = await api('/upstream-models/' + encodeURIComponent(model.id), { method: 'DELETE' });
       dialog.close();
-      notify('上游模型已删除');
+      notifyConfigResult(result, '上游模型已删除');
       loadPage();
     } catch (failure) {
       error.textContent = failure.message;
@@ -645,11 +746,18 @@ function deleteModelDialog(model) {
   dialog.footer.append(button('取消', () => dialog.close()), submit);
 }
 
-function offeringDialog(offering, model, settings) {
+async function offeringDialog(offering, model, settings) {
+  const availableModels = (await api('/models')).items;
+  const selected = availableModels.some(item => item.id === model.id) ? model.id : '';
   const dialog = openDialog(offering ? '编辑公开模型' : '发布公开模型', true);
   const form = node('form');
+  const modelSelect = select('关联模型', [['', '选择模型'], ...availableModels.map(item => [item.id, item.display_name + ' · ' + item.id])], selected, value => {
+    model = availableModels.find(item => item.id === value) || null;
+    updateVision();
+  });
+  model = availableModels.find(item => item.id === selected) || null;
   const name = input('text', 'display_name');
-  name.value = offering?.display_name ?? model.display_name;
+  name.value = offering?.display_name ?? model?.display_name ?? '';
   name.maxLength = 80;
   const description = node('textarea');
   description.name = 'description';
@@ -667,20 +775,20 @@ function offeringDialog(offering, model, settings) {
   priceVersion.required = false;
   priceVersion.maxLength = 64;
   priceVersion.value = offering?.pricing?.version ?? '';
-  priceVersion.placeholder = model.id + '-v1';
+  priceVersion.placeholder = (model?.id || 'model') + '-v1';
   const rounding = select('价格取整方式', [['ceil', '向上取整'], ['floor', '向下取整']], offering?.pricing?.rounding ?? 'ceil', () => { });
   const allowCache = input('checkbox', 'allow_cache');
   allowCache.required = false;
   allowCache.checked = offering?.cache_policy.allow ?? true;
   const scopeChoices = [['user', '用户隔离']];
-  if (settings.shared_cache_enabled) scopeChoices.push(['shared', '共享缓存']);
-  const selectedScope = offering?.cache_policy.scope === 'shared' && settings.shared_cache_enabled ? 'shared' : 'user';
+  if (settings.shared_cache_enabled || offering?.cache_policy.scope === 'shared') scopeChoices.push(['shared', settings.shared_cache_enabled ? '共享缓存' : '共享缓存（当前不可用）']);
+  const selectedScope = offering?.cache_policy.scope ?? 'user';
   const scope = select('缓存范围', scopeChoices, selectedScope, () => { });
   const ttl = input('number', 'cache_ttl_days');
   ttl.required = false;
   ttl.min = '1';
   ttl.max = String(settings.cache_max_ttl_days);
-  ttl.value = String(offering?.cache_policy.ttl_days ?? 7);
+  ttl.value = String(offering?.cache_policy.ttl_days ?? Math.min(7, settings.cache_max_ttl_days));
   const enabled = input('checkbox', 'enabled');
   enabled.required = false;
   enabled.checked = offering?.enabled ?? false;
@@ -692,7 +800,7 @@ function offeringDialog(offering, model, settings) {
   sortOrder.value = String(offering?.sort_order ?? 0);
   const vision = input('checkbox', 'capability_vision');
   vision.required = false;
-  vision.checked = offering ? offering.capabilities.includes('vision') : model.capabilities.includes('vision');
+  vision.checked = offering ? offering.capabilities.includes('vision') : !!model?.capabilities.includes('vision');
   const makeCheck = (inputNode, labelText) => {
     const row = node('div', 'check-row');
     if (!inputNode.id) inputNode.id = 'field-' + crypto.randomUUID();
@@ -701,13 +809,17 @@ function offeringDialog(offering, model, settings) {
     row.append(inputNode, label);
     return row;
   };
+  function updateVision() {
+    vision.disabled = !model || !model.capabilities.includes('vision');
+    if (vision.disabled) vision.checked = false;
+  }
+  updateVision();
   const error = node('p', 'form-error');
   error.setAttribute('role', 'alert');
   const submit = node('button', 'primary', offering ? '保存' : '发布');
   submit.type = 'submit';
   form.append(
-    formSection('公开信息', field('公开名称', name), field('说明', description),
-      ...(model.capabilities.includes('vision') ? [makeCheck(vision, '支持图片题')] : [])),
+    formSection('公开信息', field('关联模型', modelSelect), field('公开名称', name), field('说明', description), makeCheck(vision, '支持图片题')),
     formSection('Token 价格', field('输入价格（元 / 百万 token）', inputPrice),
       field('输出价格（元 / 百万 token）', outputPrice), field('价格版本', priceVersion),
       field('价格取整方式', rounding),
@@ -744,6 +856,7 @@ function offeringDialog(offering, model, settings) {
       const cacheDays = Number(ttl.value);
       if (!Number.isInteger(cacheDays) || cacheDays < 1 || cacheDays > settings.cache_max_ttl_days) throw new Error('缓存期限必须在 1 到 ' + settings.cache_max_ttl_days + ' 天之间');
       if (isDefault.checked && !enabled.checked) throw new Error('默认模型必须同时设为可见');
+      if (!model) throw new Error('请选择关联模型');
       const capabilities = ['text'];
       if (vision.checked) capabilities.push('vision');
       const payload = {
@@ -768,7 +881,7 @@ function offeringDialog(offering, model, settings) {
       submit.disabled = false;
     }
   });
-  dialog.content.append(node('p', 'muted', '模型引用：' + model.id + ' · ' + (protocolLabels[model.protocol] || model.protocol)), form);
+  dialog.content.append(form);
 }
 function cacheDialog(value) {
   const dialog = openDialog('缓存详情', true);
@@ -828,7 +941,7 @@ async function renderList(page, route) {
 }
 async function renderSettings(page) {
   const settings = await api('/settings');
-  const appearanceCard = node('section', 'card');
+  const appearanceCard = node('section', 'settings-section');
   appearanceCard.append(node('h2', '', '外观'));
   const choices = node('div', 'appearance');
   const update = (key, value) => {
@@ -839,7 +952,7 @@ async function renderSettings(page) {
   choices.append(field('配色', select('配色', [['graphite', '石墨'], ['grove', '青禾'], ['indigo', '靛蓝']], appearance.palette, value => update('palette', value))));
   choices.append(field('显示模式', select('显示模式', [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']], appearance.mode, value => update('mode', value))));
   appearanceCard.append(choices);
-  const serviceCard = node('section', 'card');
+  const serviceCard = node('section', 'settings-section');
   serviceCard.append(node('h2', '', '当前服务设置'), detailGrid([
     ['默认缓存期限', settings.cache_ttl_days + ' 天'], ['最长缓存期限', settings.cache_max_ttl_days + ' 天'], ['共享缓存', settings.shared_cache_enabled ? '已启用' : '未启用'],
     ['默认公开条目', settings.default_offering_id || '未指定'], ['已发布条目', settings.published_offering_count + ' / ' + settings.offering_count],
@@ -879,7 +992,6 @@ async function loadPage() {
   if (!view) {
     const heading = node('div', 'page-heading');
     const actions = node('div', 'actions');
-    if (route === 'offerings' && session.role === 'maintainer') actions.append(button('新增上游模型', () => upstreamModelDialog(null), 'primary'));
     actions.append(button('刷新', () => loadPage()));
     heading.append(node('h1', '', navigation.find(value => value[0] === route)[1]), actions);
     const body = node('div', 'page-body');

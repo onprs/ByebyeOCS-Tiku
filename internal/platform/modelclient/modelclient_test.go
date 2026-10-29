@@ -54,6 +54,13 @@ func TestMapErrorDoesNotLeakRawError(t *testing.T) {
 	}
 }
 
+func TestUsageFromEngineRejectsNegativeCounts(t *testing.T) {
+	usage := usageFromEngine(engine.TokenUsage{Present: true, Complete: true, InputTokens: -1, OutputTokens: 2, TotalTokens: 1})
+	if usage.Complete || usage.InputTokens != nil || usage.OutputTokens == nil || usage.TotalTokens == nil {
+		t.Fatalf("无效用量不应作为完整事实：%+v", usage)
+	}
+}
+
 func TestLargeResponseIsBounded(t *testing.T) {
 	client, baseURL := tlsClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

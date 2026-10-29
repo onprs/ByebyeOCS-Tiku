@@ -91,7 +91,7 @@ func (s *Store) Create(ctx context.Context, item *Offering, actor string) (*Offe
 	}
 	defer rollback(tx)
 	if item.Default {
-		if _, err := tx.Exec(ctx, `UPDATE tiku.offerings SET is_default = false WHERE is_default`); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE tiku.offerings SET is_default = false, version = version + 1, updated_at = now() WHERE is_default`); err != nil {
 			return nil, err
 		}
 	}
@@ -109,6 +109,9 @@ func (s *Store) Create(ctx context.Context, item *Offering, actor string) (*Offe
 		return nil, err
 	}
 	if err := recordPriceVersion(ctx, tx, created.ID, item.Pricing, actor); err != nil {
+		return nil, err
+	}
+	if err := recordOfferingAudit(ctx, tx, actor, "offering.create", created); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -150,7 +153,7 @@ func (s *Store) Update(ctx context.Context, item *Offering, version int64, actor
 		return nil, ErrVersionConflict
 	}
 	if item.Default {
-		if _, err := tx.Exec(ctx, `UPDATE tiku.offerings SET is_default = false WHERE is_default AND id <> $1`, currentID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE tiku.offerings SET is_default = false, version = version + 1, updated_at = now() WHERE is_default AND id <> $1`, currentID); err != nil {
 			return nil, err
 		}
 	}
@@ -171,6 +174,9 @@ func (s *Store) Update(ctx context.Context, item *Offering, version int64, actor
 	if err := recordPriceVersion(ctx, tx, currentID, item.Pricing, actor); err != nil {
 		return nil, err
 	}
+	if err := recordOfferingAudit(ctx, tx, actor, "offering.update", updated); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -178,7 +184,7 @@ func (s *Store) Update(ctx context.Context, item *Offering, version int64, actor
 }
 
 // Retire 只关闭可见性与默认状态，不校验配置模型是否存在；用于模型已从配置移除的条目。
-func (s *Store) Retire(ctx context.Context, publicID string, version int64) (*Offering, error) {
+func (s *Store) Retire(ctx context.Context, actor, publicID string, version int64) (*Offering, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -201,10 +207,24 @@ func (s *Store) Retire(ctx context.Context, publicID string, version int64) (*Of
 	if err != nil {
 		return nil, err
 	}
+	if err := recordOfferingAudit(ctx, tx, actor, "offering.retire", retired); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return retired, nil
+}
+
+func recordOfferingAudit(ctx context.Context, tx pgx.Tx, actor, action string, item *Offering) error {
+	detail, err := json.Marshal(map[string]any{"provider_ref": item.ProviderRef, "enabled": item.Enabled,
+		"is_default": item.Default, "price_version": item.PriceVersion})
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO tiku.panel_audit(id,actor,action,resource_id,detail) VALUES($1,$2,$3,$4,$5)`,
+		newUUID(), actor, action, item.PublicID, detail)
+	return err
 }
 
 // recordPriceVersion 记录首次出现的价格版本；重用同一版本时必须费率一致。

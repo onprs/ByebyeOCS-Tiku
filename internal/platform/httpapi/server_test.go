@@ -108,7 +108,7 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 		return
 	}
-	if mode == "rate_limited" {
+	if mode == "rate_limited" || (mode == "caption_then_rate_limited" && !strings.Contains(body.Model, "caption")) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
@@ -385,10 +385,10 @@ func TestExactCacheAndOptionOrder(t *testing.T) {
 func TestUpstreamErrorDoesNotLeak(t *testing.T) {
 	f := newFixture(t, fixtureOptions{mode: "leaky_error", vision: true, caption: true})
 	recorder := answerV2(t, f, v2Request("错误安全题", "A. 甲", "cache_first", "req-leak-0001", "idem-leak-0001", nil), "idem-leak-0001")
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("上游 500 应映射为 503，实际 %d: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("上游 500 后用量不明应待核对，实际 %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if decodeErrorCode(t, recorder) != "model_unavailable" {
+	if decodeErrorCode(t, recorder) != "request_unknown" {
 		t.Fatalf("错误码不稳定: %s", recorder.Body.String())
 	}
 	body := recorder.Body.String()

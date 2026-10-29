@@ -49,6 +49,43 @@ func (r *Registry) Model(id string) *config.Model {
 	return nil
 }
 
+// Resolve 在同一快照中读取模型与密钥，避免热更新时混用不同版本。
+func (r *Registry) Resolve(id string) (*config.Model, string) {
+	model, key, _, _ := r.ResolveForAnswer(id, false)
+	return model, key
+}
+
+// ResolveForAnswer 一次读取回答模型及需要的图片转述模型，保持缓存与调用使用同一快照。
+func (r *Registry) ResolveForAnswer(id string, withImages bool) (*config.Model, string, *config.Model, string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var model, caption *config.Model
+	for i := range r.models {
+		if r.models[i].ID == id {
+			item := r.models[i]
+			model = &item
+			break
+		}
+	}
+	if model == nil {
+		return nil, "", nil, ""
+	}
+	if withImages && !model.Vision && r.captionID != "" {
+		for i := range r.models {
+			if r.models[i].ID == r.captionID {
+				item := r.models[i]
+				caption = &item
+				break
+			}
+		}
+	}
+	captionKey := ""
+	if caption != nil {
+		captionKey = r.keys[caption.ID]
+	}
+	return model, r.keys[id], caption, captionKey
+}
+
 func (r *Registry) Key(id string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -75,6 +112,14 @@ func (r *Registry) CaptionID() string {
 
 // Replace 校验非空标识唯一后原子替换模型与密钥快照。
 func (r *Registry) Replace(items []config.Model, keys map[string]string) error {
+	return r.replace(items, keys, nil, nil)
+}
+
+func (r *Registry) ReplaceWithDefaults(items []config.Model, keys map[string]string, defaultID, captionID string) error {
+	return r.replace(items, keys, &defaultID, &captionID)
+}
+
+func (r *Registry) replace(items []config.Model, keys map[string]string, defaultID, captionID *string) error {
 	seen := make(map[string]bool, len(items))
 	for _, item := range items {
 		if item.ID == "" || seen[item.ID] {
@@ -90,6 +135,9 @@ func (r *Registry) Replace(items []config.Model, keys map[string]string) error {
 	}
 	r.mu.Lock()
 	r.models, r.keys = copied, keyCopy
+	if defaultID != nil && captionID != nil {
+		r.defaultID, r.captionID = *defaultID, *captionID
+	}
 	r.mu.Unlock()
 	return nil
 }

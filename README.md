@@ -5,10 +5,10 @@
 ## 功能
 
 - 支持单选、多选、判断、填空和简答题，以及图片题。
-- 按请求选择已配置模型，支持 OpenAI 兼容、Anthropic、Gemini 和 Ollama 协议。
+- 按请求选择已配置模型，提供商集中管理协议、地址与密钥；支持 OpenAI 兼容、Anthropic、Gemini 和 Ollama 协议。
 - `cache_first` 优先查精确缓存，未命中再调用模型；`always_llm` 每次调用模型，允许缓存时保留成功答案。
 - 返回输入、输出及总 token、缓存命中和调用明细；缓存命中 token 为零，用量不完整时明确标记。
-- 维护面板直接新增、编辑、删除上游模型，发布公开模型条目、token 价格版本与缓存策略，支持模型启停、连通性检查、功能测试、用量汇总和错误缓存失效。
+- 维护面板分别管理提供商、模型与公开价格，支持模型启停、连通性检查、功能测试、用量汇总和错误缓存失效。
 - 提供带独立登录的维护面板，区分维护员与只读账号；支持石墨、青禾、靛蓝及浅色、深色显示。
 - 相同幂等请求返回保留期内的原结果，过期请求保留记录以防重复调用；公开价格版本在此维护，钱包、预占、结算与账本由 ByebyeOCS 管理。
 
@@ -29,17 +29,28 @@ cp ocs-tiku-fork.example.json ocs-tiku-fork.json
 
 ```json
 {
-  "id": "default-text",
-  "display_name": "默认文字模型",
-  "protocol": "openai-chat",
-  "base_url": "https://models.example.com/v1",
-  "model": "<供应商模型名称>",
-  "api_key_file": "secrets/model.key",
-  "max_output_tokens": 2048
+  "providers": [
+    {
+      "id": "example-provider",
+      "name": "模型服务",
+      "protocol": "openai-chat",
+      "base_url": "https://models.example.com/v1",
+      "api_key_file": "secrets/provider.key"
+    }
+  ],
+  "models": [
+    {
+      "id": "default-text",
+      "provider_id": "example-provider",
+      "display_name": "默认文字模型",
+      "model": "<供应商模型名称>",
+      "max_output_tokens": 2048
+    }
+  ]
 }
 ```
 
-可以先在配置文件的 `models` 数组写入模型，也可以启动后直接在维护面板的“上游模型”中添加。面板保存会原子更新同一配置文件并热加载，密钥写入配置文件同目录的 `secrets/` 私密文件，不需要重启服务。服务用户必须对配置目录有写权限；官方 systemd 单元已将题库配置目录列为可写，程序目录仍只读。按需设置 `default_model_id`（仅 v1 兼容入口使用）、图片模型及缓存期限，然后检查配置、显式迁移并启动：
+多个模型可以引用同一个提供商。已有将协议、地址和密钥文件写在模型中的配置仍然可用。也可以在维护面板先添加提供商，再添加模型；面板保存会更新同一配置文件并热加载，密钥写入配置文件同目录的 `secrets/` 私密文件。服务用户必须对配置目录有写权限；官方 systemd 单元已将题库配置目录列为可写，程序目录仍只读。按需设置 `default_model_id`（仅 v1 兼容入口使用）、图片模型及缓存期限，然后检查配置、显式迁移并启动：
 
 ```sh
 ./ocs-tiku-fork config check -config ocs-tiku-fork.json
@@ -47,7 +58,7 @@ cp ocs-tiku-fork.example.json ocs-tiku-fork.json
 ./ocs-tiku-fork serve -config ocs-tiku-fork.json
 ```
 
-默认监听 `127.0.0.1:8093`。启动前需显式完成对应版本迁移，未迁移或版本不匹配时服务会退出；服务不会创建默认模型。访问接口需要服务令牌；ByebyeOCS 中的题库地址和令牌应与此处一致。可用性检查使用`/readyz`，存活检查使用`/healthz`。
+默认监听 `127.0.0.1:8093`。启动前需显式完成对应版本迁移，未迁移或版本不匹配时服务会退出；服务不会创建默认模型。已有安装升级到本版本时，先备份题库数据库和配置，再使用新程序执行上述 `migrate` 命令，然后启动服务。访问接口需要服务令牌；ByebyeOCS 中的题库地址和令牌应与此处一致。可用性检查使用`/readyz`，存活检查使用`/healthz`。
 
 ## 使用
 
@@ -77,7 +88,7 @@ cp ocs-tiku-fork.example.json ocs-tiku-fork.json
 
 ## 维护面板
 
-面板提供运行总览、模型与价格、查询详情、精确缓存、操作记录和外观设置。维护员可新增、编辑、删除上游模型及密钥，发布、编辑、下架公开条目，维护价格版本、默认项与缓存策略，启停和测试模型，并使错误缓存失效；只读账号仅可查看。上游模型元数据写入题库配置文件，密钥写入 `secrets/` 私密文件，保存后热加载；公开条目、价格与缓存策略保存在题库数据库。模型密钥与内部服务令牌不会显示在面板中。
+维护员可在“模型与价格”中分别管理提供商、模型和公开价格；一个模型可发布多个公开条目。模型密钥与内部服务令牌不会显示在面板中。只读账号仅可查看。
 
 面板默认关闭。可在 Bash 中为维护账号生成密码哈希：
 

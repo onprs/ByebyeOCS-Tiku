@@ -71,8 +71,14 @@ func (s *Service) Create(ctx context.Context, actor string, input Input) (*Offer
 	if err != nil {
 		return nil, err
 	}
-	if item.Enabled && s.healthFor(ctx, item.ProviderRef) == HealthUnavailable {
-		return nil, invalid("模型当前不可用，不能发布为可见条目")
+	if item.Enabled {
+		overrides, err := s.store.modelOverrides(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if s.health(item.ProviderRef, overrides) == HealthUnavailable {
+			return nil, invalid("模型当前不可用，不能发布为可见条目")
+		}
 	}
 	created, err := s.store.Create(ctx, item, actor)
 	if err != nil {
@@ -91,8 +97,14 @@ func (s *Service) Update(ctx context.Context, actor, publicID string, version in
 	if err != nil {
 		return nil, err
 	}
-	if item.Enabled && s.healthFor(ctx, item.ProviderRef) == HealthUnavailable {
-		return nil, invalid("模型当前不可用，不能发布为可见条目")
+	if item.Enabled {
+		overrides, err := s.store.modelOverrides(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if s.health(item.ProviderRef, overrides) == HealthUnavailable {
+			return nil, invalid("模型当前不可用，不能发布为可见条目")
+		}
 	}
 	updated, err := s.store.Update(ctx, item, version, actor)
 	if err != nil {
@@ -110,8 +122,8 @@ func (s *Service) PriceVersions(ctx context.Context, publicID string) ([]PriceVe
 }
 
 // Retire 关闭条目的可见性与默认状态；即使配置模型已被移除也可执行。
-func (s *Service) Retire(ctx context.Context, publicID string, version int64) (*Offering, error) {
-	item, err := s.store.Retire(ctx, publicID, version)
+func (s *Service) Retire(ctx context.Context, actor, publicID string, version int64) (*Offering, error) {
+	item, err := s.store.Retire(ctx, actor, publicID, version)
 	if err != nil {
 		return nil, err
 	}

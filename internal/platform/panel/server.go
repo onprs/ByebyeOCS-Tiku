@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,14 +29,15 @@ import (
 var assets embed.FS
 
 type Server struct {
-	cfg      *config.Config
-	svc      *answer.Service
-	store    *store.Store
-	catalog  *catalog.Service
-	registry *models.Registry
-	editor   *modelconfig.Editor
-	auth     *authentication
-	secure   bool
+	cfg       *config.Config
+	svc       *answer.Service
+	store     *store.Store
+	catalog   *catalog.Service
+	registry  *models.Registry
+	editor    *modelconfig.Editor
+	auth      *authentication
+	secure    bool
+	catalogMu sync.Mutex
 }
 
 func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *models.Registry) (http.Handler, error) {
@@ -64,6 +66,10 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *mod
 	mux.HandleFunc("GET /panel/api/offerings/{id}/price-versions", server.protect(false, server.priceVersions))
 	mux.HandleFunc("POST /panel/api/offerings/{id}/tests", server.protect(true, server.testOffering))
 	mux.HandleFunc("POST /panel/api/offerings/{id}/retirements", server.protect(true, server.retireOffering))
+	mux.HandleFunc("GET /panel/api/providers", server.protect(false, server.providers))
+	mux.HandleFunc("POST /panel/api/providers", server.protect(true, server.createProvider))
+	mux.HandleFunc("PATCH /panel/api/providers/{id}", server.protect(true, server.updateProvider))
+	mux.HandleFunc("DELETE /panel/api/providers/{id}", server.protect(true, server.deleteProvider))
 	mux.HandleFunc("POST /panel/api/upstream-models", server.protect(true, server.createModel))
 	mux.HandleFunc("PATCH /panel/api/upstream-models/{id}", server.protect(true, server.updateModel))
 	mux.HandleFunc("DELETE /panel/api/upstream-models/{id}", server.protect(true, server.deleteModel))
@@ -229,7 +235,26 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request, current sessio
 		databaseFailure(w, err)
 		return
 	}
-	jsonResponse(w, 200, value)
+	var summary map[string]json.RawMessage
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(value, &summary); err != nil {
+		databaseFailure(w, err)
+		return
+	}
+	if err := json.Unmarshal(summary["by_model"], &rows); err != nil {
+		databaseFailure(w, err)
+		return
+	}
+	for _, row := range rows {
+		var id string
+		if json.Unmarshal(row["model_id"], &id) == nil {
+			if model := s.registry.Model(id); model != nil {
+				row["display_name"], _ = json.Marshal(model.DisplayName)
+			}
+		}
+	}
+	summary["by_model"], _ = json.Marshal(rows)
+	jsonResponse(w, 200, summary)
 }
 func (s *Server) models(w http.ResponseWriter, r *http.Request, current session) {
 	models, err := s.svc.Models(r.Context())
@@ -249,7 +274,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request, current session)
 			continue
 		}
 		items = append(items, map[string]any{"id": model.ID, "display_name": model.DisplayName, "capabilities": model.Capabilities, "enabled": model.Enabled, "health": model.Health,
-			"protocol": configured.Protocol, "vendor": configured.Vendor, "base_url": configured.BaseURL,
+			"provider_id": configured.ProviderID, "protocol": configured.Protocol, "vendor": configured.Vendor, "base_url": configured.BaseURL,
 			"upstream_model": configured.Model, "vision": configured.Vision, "tool_call": configured.ToolCall,
 			"reasoning": configured.Reasoning, "context": configured.Context, "max_output_tokens": configured.MaxOutputTokens,
 			"key_configured": configured.APIKeyFile != "", "locked": configured.Disabled,
@@ -332,7 +357,8 @@ func listFilter(w http.ResponseWriter, r *http.Request, statuses string) (store.
 		}
 		filter.Limit = n
 	}
-	if _, _, err := store.PanelCursor(filter.Cursor); err != nil || len(filter.Model) > 64 || (filter.Status != "" && !strings.Contains("|"+statuses+"|", "|"+filter.Status+"|")) {
+	_, cursorID, cursorErr := store.PanelCursor(filter.Cursor)
+	if cursorErr != nil || (filter.Cursor != "" && (strings.HasSuffix(r.URL.Path, "/cache") || strings.HasSuffix(r.URL.Path, "/audit")) && !uuidPattern.MatchString(cursorID)) || len(filter.Model) > 64 || (filter.Status != "" && !strings.Contains("|"+statuses+"|", "|"+filter.Status+"|")) {
 		fail(w, 422, "validation_failed", "筛选条件无效")
 		return filter, false
 	}

@@ -65,14 +65,15 @@ type CacheInfo struct {
 }
 
 type Call struct {
-	Slot         string `json:"slot"`
-	ModelID      string `json:"-"`
-	InputTokens  *int64 `json:"input_tokens"`
-	OutputTokens *int64 `json:"output_tokens"`
-	TotalTokens  *int64 `json:"total_tokens"`
-	Status       string `json:"status"`
-	LatencyMS    int64  `json:"latency_ms"`
-	ErrorCode    string `json:"error_code,omitempty"`
+	Slot          string `json:"slot"`
+	ModelID       string `json:"-"`
+	InputTokens   *int64 `json:"input_tokens"`
+	OutputTokens  *int64 `json:"output_tokens"`
+	TotalTokens   *int64 `json:"total_tokens"`
+	UsageComplete bool   `json:"-"`
+	Status        string `json:"status"`
+	LatencyMS     int64  `json:"latency_ms"`
+	ErrorCode     string `json:"error_code,omitempty"`
 }
 
 type Usage struct {
@@ -173,6 +174,15 @@ func (s *Service) Answer(ctx context.Context, req Request, idempotencyKey string
 	if err != nil {
 		return nil, err
 	}
+	model, modelKey, caption, captionKey := s.models.ResolveForAnswer(model.ID, len(prepared.Images) > 0)
+	if model == nil {
+		return nil, newError("model_not_configured", "模型条目不存在或未配置", 503, false)
+	}
+	effectiveBudget := model.EffectiveMaxOutputTokens(s.cfg.Limits.MaxOutputTokens)
+	if req.Budget.MaxOutputTokens > 0 && req.Budget.MaxOutputTokens < effectiveBudget {
+		effectiveBudget = req.Budget.MaxOutputTokens
+	}
+	key = store.Hash(fmt.Sprintf("%s:config:%s:budget:%d", key, cacheConfiguration(model, modelKey, caption, captionKey), effectiveBudget))
 	fingerprint := fingerprint(req, idempotencyKey)
 	// 模型停用与声明参数都在写入请求记录前判定：这里既不调用模型，也不留下
 	// 终态幂等记录；管理员恢复配置或启用模型后，同一请求键可以重新执行。
@@ -193,7 +203,7 @@ func (s *Service) Answer(ctx context.Context, req Request, idempotencyKey string
 	if !created {
 		return s.replay(ctx, record, idempotencyKey, req.RequestID, fingerprint)
 	}
-	resp, err := s.execute(ctx, req, model, prepared, key, scopeHash, idempotencyKey)
+	resp, err := s.execute(ctx, req, model, modelKey, caption, captionKey, prepared, key, scopeHash, idempotencyKey)
 	if err != nil {
 		code := AsError(err).Code
 		// 超时/取消可能已产生上游费用：保留 unknown 事实，禁止同键自动重放。
@@ -233,6 +243,27 @@ func persistContext(ctx context.Context) (context.Context, context.CancelFunc) {
 
 func (s *Service) pendingStale(record *store.RequestRecord) bool {
 	return s.now().Sub(record.CreatedAt) > s.cfg.Timeout()+pendingGrace
+}
+
+// cacheConfiguration 只把配置与密钥摘要用于缓存隔离，不保存或返回密钥内容。
+func cacheConfiguration(model *config.Model, modelKey string, caption *config.Model, captionKey string) string {
+	type profile struct {
+		Protocol, Vendor, BaseURL, Model, Key string
+		Vision                                bool
+		MaxOutputTokens                       int
+	}
+	makeProfile := func(item *config.Model, key string) *profile {
+		if item == nil {
+			return nil
+		}
+		return &profile{Protocol: item.Protocol, Vendor: item.Vendor, BaseURL: item.BaseURL,
+			Model: item.Model, Key: store.Hash(key), Vision: item.Vision, MaxOutputTokens: item.MaxOutputTokens}
+	}
+	data, _ := json.Marshal(struct {
+		Model   *profile `json:"model"`
+		Caption *profile `json:"caption"`
+	}{makeProfile(model, modelKey), makeProfile(caption, captionKey)})
+	return store.Hash(string(data))
 }
 
 func fingerprint(req Request, key string) string {
@@ -382,7 +413,7 @@ func (s *Service) validate(req Request) (*config.Model, normalize.Question, stri
 	return model, prepared, key, scopeHash, nil
 }
 
-func (s *Service) execute(ctx context.Context, req Request, model *config.Model, prepared normalize.Question, cacheKey, scopeHash, idemKey string) (*Response, error) {
+func (s *Service) execute(ctx context.Context, req Request, model *config.Model, modelKey string, caption *config.Model, captionKey string, prepared normalize.Question, cacheKey, scopeHash, idemKey string) (*Response, error) {
 	start := s.now()
 	allowCache, ttlDays := true, s.cfg.Cache.TTLDays
 	if req.CachePolicy != nil {
@@ -422,9 +453,32 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 		return nil, newError("request_cancelled", "请求已取消，模型尚未调用", 499, false)
 	}
 
-	answer, usage, solveErr := s.solve(callCtx, model, prepared, req.Budget.MaxOutputTokens)
+	answer, usage, solveErr := s.solve(callCtx, model, modelKey, caption, captionKey, prepared, req.Budget.MaxOutputTokens)
 	latency := time.Since(start).Milliseconds()
+	// 即使后续调用失败，也保留已经发生的模型调用事实。
+	callsCtx, cancelCalls := persistContext(ctx)
+	callsErr := s.recordCalls(callsCtx, req.RequestID, usage.Calls)
+	cancelCalls()
+	if callsErr != nil {
+		s.recordUnknownQuery(ctx, req, model.ID, scopeHash, idemKey, usage, latency)
+		return nil, newError("request_unknown", "模型调用事实未能完整保存，请核对用量", 409, false)
+	}
 	if solveErr != nil {
+		code := AsError(solveErr).Code
+		if code == "upstream_timeout" || code == "request_cancelled" {
+			s.recordUnknownQuery(ctx, req, model.ID, scopeHash, idemKey, usage, latency)
+			return nil, solveErr
+		}
+		if code == "model_unavailable" || code == "response_too_large" || code == "empty_answer" {
+			s.recordUnknownQuery(ctx, req, model.ID, scopeHash, idemKey, usage, latency)
+			return nil, newError("request_unknown", "模型调用可能已产生用量，请核对结果", 409, false)
+		}
+		for _, call := range usage.Calls {
+			if call.Status == "ok" {
+				s.recordUnknownQuery(ctx, req, model.ID, scopeHash, idemKey, usage, latency)
+				return nil, newError("request_unknown", "部分模型调用已产生用量，请核对结果", 409, false)
+			}
+		}
 		return nil, solveErr
 	}
 	status := "answered"
@@ -439,7 +493,6 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 	// 模型调用已成功，事实与缓存必须在有界后台上下文内写完，客户端断开不能丢失已付费结果。
 	persistCtx, cancelPersist := persistContext(ctx)
 	defer cancelPersist()
-	s.recordCalls(persistCtx, req.RequestID, usage.Calls)
 	if allowCache && usage.Complete && strings.TrimSpace(answer) != "" {
 		expires := s.now().Add(time.Duration(ttlDays) * 24 * time.Hour)
 		// 缓存只是优化：写入失败不能让已成功的模型作答失败或丢失幂等结果。
@@ -457,7 +510,7 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 	return resp, nil
 }
 
-func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Question, budget int) (string, Usage, error) {
+func (s *Service) solve(ctx context.Context, model *config.Model, modelKey string, caption *config.Model, captionKey string, q normalize.Question, budget int) (string, Usage, error) {
 	maxTokens := model.EffectiveMaxOutputTokens(s.cfg.Limits.MaxOutputTokens)
 	if budget > 0 && budget < maxTokens {
 		maxTokens = budget
@@ -466,13 +519,8 @@ func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Qu
 	usage := Usage{Calls: calls, Complete: true}
 	var captions []string
 	if len(q.Images) > 0 && !model.Vision {
-		captionID := s.models.CaptionID()
-		if captionID == "" {
-			return "", usage, newError("vision_unsupported", "当前模型不支持图片，且未配置图片转述模型", 422, false)
-		}
-		caption := s.models.Model(captionID)
 		if caption == nil {
-			return "", usage, newError("vision_unsupported", "图片转述模型未配置", 422, false)
+			return "", usage, newError("vision_unsupported", "当前模型不支持图片，且未配置图片转述模型", 422, false)
 		}
 		disabled, err := s.store.ModelDisabled(ctx, caption.ID)
 		if err != nil {
@@ -484,7 +532,7 @@ func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Qu
 		for _, img := range q.Images {
 			result, err := s.client.Chat(ctx, modelclient.Call{
 				Protocol: caption.Protocol, Vendor: caption.Vendor,
-				BaseURL: caption.BaseURL, APIKey: s.models.Key(caption.ID), Model: caption.Model,
+				BaseURL: caption.BaseURL, APIKey: captionKey, Model: caption.Model,
 				System: "你只描述图片中可见的文字和关键信息，不回答题目。",
 				Prompt: "请转述这张题目图片的文字与关键信息。", Images: []normalize.Image{img},
 				MaxOutputTokens: minInt(512, caption.EffectiveMaxOutputTokens(s.cfg.Limits.MaxOutputTokens)), Temperature: 0.1,
@@ -504,7 +552,7 @@ func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Qu
 	prompt := buildPrompt(q, captions)
 	result, err := s.client.Chat(ctx, modelclient.Call{
 		Protocol: model.Protocol, Vendor: model.Vendor,
-		BaseURL: model.BaseURL, APIKey: s.models.Key(model.ID), Model: model.Model,
+		BaseURL: model.BaseURL, APIKey: modelKey, Model: model.Model,
 		System: "你是学习通题库答题助手。请根据题目给出答案，输出 <answer>答案</answer>。",
 		Prompt: prompt, Images: pickImages(q.Images, model.Vision), MaxOutputTokens: maxTokens, Temperature: 0,
 	})
@@ -516,6 +564,7 @@ func (s *Service) solve(ctx context.Context, model *config.Model, q normalize.Qu
 	usage.Complete = usage.Complete && result.Usage.Complete
 	if usage.Complete {
 		usage.InputTokens, usage.OutputTokens, usage.TotalTokens = sumUsage(calls)
+		usage.Complete = usage.InputTokens != nil && usage.OutputTokens != nil && usage.TotalTokens != nil
 	}
 	answer := ExtractAnswer(result.Content, result.Reasoning, q.Type)
 	if strings.TrimSpace(answer) == "" {
@@ -548,7 +597,7 @@ func callErrorCode(err error) string {
 }
 
 func callFromResult(slot, modelID string, result modelclient.Result, err error) Call {
-	call := Call{Slot: slot, ModelID: modelID, Status: "ok", LatencyMS: result.Latency.Milliseconds(),
+	call := Call{Slot: slot, ModelID: modelID, Status: "ok", LatencyMS: result.Latency.Milliseconds(), UsageComplete: result.Usage.Complete,
 		InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens, TotalTokens: result.Usage.TotalTokens}
 	if err != nil {
 		call.Status = "error"
@@ -594,6 +643,25 @@ func buildPrompt(q normalize.Question, captions []string) string {
 	return strings.Join(parts, "\n")
 }
 
+// recordUnknownQuery 保留已确认的部分用量，整体仍标记为不完整，不能自动结算。
+func (s *Service) recordUnknownQuery(ctx context.Context, req Request, modelID, scopeHash, idemKey string, usage Usage, latency int64) {
+	known := make([]Call, 0, len(usage.Calls))
+	for _, call := range usage.Calls {
+		if call.Status == "ok" && call.UsageComplete {
+			known = append(known, call)
+		}
+	}
+	partial := Usage{Complete: false, Calls: usage.Calls}
+	if len(known) > 0 {
+		partial.InputTokens, partial.OutputTokens, partial.TotalTokens = sumUsage(known)
+	}
+	persistCtx, cancel := persistContext(ctx)
+	defer cancel()
+	s.recordQuery(persistCtx, req, modelID, scopeHash, idemKey, &Response{
+		RequestID: req.RequestID, Status: "unknown", Usage: partial, LatencyMS: latency,
+	}, "", time.Time{})
+}
+
 func (s *Service) recordQuery(ctx context.Context, req Request, modelID, scopeHash, idemKey string, resp *Response, cacheEntryID string, cacheCreated time.Time) {
 	usage, err := store.MarshalUsage(resp.Usage)
 	if err != nil {
@@ -614,20 +682,23 @@ func (s *Service) recordQuery(ctx context.Context, req Request, modelID, scopeHa
 }
 
 // recordCalls 保存每次真实模型调用的事实；缓存命中没有调用，不写入伪记录。
-func (s *Service) recordCalls(ctx context.Context, requestID string, calls []Call) {
+func (s *Service) recordCalls(ctx context.Context, requestID string, calls []Call) error {
 	for _, call := range calls {
-		complete := call.InputTokens != nil && call.OutputTokens != nil && call.TotalTokens != nil
-		_ = s.store.RecordModelCall(ctx, store.ModelCall{
+		complete := call.UsageComplete
+		if err := s.store.RecordModelCall(ctx, store.ModelCall{
 			ID: store.NewUUID(), RequestID: requestID, Slot: call.Slot, ModelID: call.ModelID,
 			InputTokens: call.InputTokens, OutputTokens: call.OutputTokens, TotalTokens: call.TotalTokens,
 			UsageComplete: complete, Status: call.Status, LatencyMS: call.LatencyMS, ErrorCode: call.ErrorCode,
-		})
+		}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // Legacy 保留 v1 `/api/search`：固定默认模型、每次都调用模型、只返回字符串字段。
 func (s *Service) Legacy(ctx context.Context, title, options, questionType string, images []string) (string, string, error) {
-	model := s.cfg.DefaultModel()
+	model, modelKey, caption, captionKey := s.models.ResolveForAnswer(s.models.DefaultID(), len(images) > 0)
 	if model == nil {
 		return "", "", newError("model_unavailable", "未配置可用的默认模型", 503, false)
 	}
@@ -652,7 +723,7 @@ func (s *Service) Legacy(ctx context.Context, title, options, questionType strin
 	case <-callCtx.Done():
 		return "", "", newError("request_cancelled", "请求已取消，模型尚未调用", 499, false)
 	}
-	answer, usage, err := s.solve(callCtx, model, prepared, 0)
+	answer, usage, err := s.solve(callCtx, model, modelKey, caption, captionKey, prepared, 0)
 	if err != nil {
 		return "", "", err
 	}
@@ -708,7 +779,7 @@ func (s *Service) SetModelDisabled(ctx context.Context, modelID string, disabled
 }
 
 func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCost bool) (TestResult, error) {
-	model := s.models.Model(modelID)
+	model, modelKey := s.models.Resolve(modelID)
 	if model == nil {
 		return TestResult{}, newError("not_found", "模型条目不存在", 404, false)
 	}
@@ -724,7 +795,7 @@ func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCo
 	var usage *Usage
 	if kind == "reachability" {
 		testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		testErr = s.client.Reachability(testCtx, model.Protocol, model.BaseURL, s.models.Key(model.ID))
+		testErr = s.client.Reachability(testCtx, model.Protocol, model.BaseURL, modelKey)
 		cancel()
 		result.Reachable = testErr == nil
 	} else {
@@ -749,14 +820,14 @@ func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCo
 		}
 		response, err := s.client.Chat(testCtx, modelclient.Call{
 			Protocol: model.Protocol, Vendor: model.Vendor,
-			BaseURL: model.BaseURL, APIKey: s.models.Key(model.ID), Model: model.Model,
+			BaseURL: model.BaseURL, APIKey: modelKey, Model: model.Model,
 			System: "只回复 OK", Prompt: "请回复 OK", MaxOutputTokens: 16, Temperature: 0,
 		})
 		testErr = err
 		if err == nil && strings.TrimSpace(response.Content) == "" {
 			testErr = &modelclient.Error{Code: "empty_answer", Message: "模型返回空内容"}
 		}
-		if err == nil {
+		if testErr == nil {
 			result.Functional = true
 			result.Reachable = true
 			call := callFromResult("answer", model.ID, response, nil)

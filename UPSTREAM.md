@@ -77,13 +77,15 @@ go test -tags ocs_frontend .
 
 ## 正式维护面板与缓存策略
 
-正式面板默认关闭，启用后使用配置中独立维护账号登录；`maintainer` 可新增/编辑/删除上游模型、维护公开条目与价格版本、缓存策略、启停和测试模型、使缓存失效，`viewer` 只读。上游模型元数据原子写回配置文件，密钥写入同目录 `secrets/` 的 0600 文件，保存后通过运行时注册表热加载。密码以私密文件中的 bcrypt 哈希配置，使用 `panel-password` 从标准输入或私密文件生成。面板采用 HttpOnly、SameSite=Strict Cookie 和 CSRF 校验，写操作校验精确来源；服务令牌不能用于面板登录，也不会返回给浏览器。会话保存在进程内，8小时到期或重启后失效；登录尝试与会话总数有界。
+正式面板默认关闭，启用后使用配置中独立维护账号登录；`maintainer` 可维护提供商、模型、公开条目与价格版本、缓存策略、模型测试和缓存失效，`viewer` 只读。提供商负责协议、地址及密钥，多个模型可引用同一提供商；旧的模型内嵌连接配置继续可用。元数据原子写回配置文件，密钥写入同目录 `secrets/` 的 0600 文件，保存后通过运行时注册表热加载。使用需要密钥的协议时，更改地址或协议需要重新提供密钥；失败的配置不会覆盖原密钥。密码以私密文件中的 bcrypt 哈希配置，使用 `panel-password` 从标准输入或私密文件生成。面板采用 HttpOnly、SameSite=Strict Cookie 和 CSRF 校验，写操作校验精确来源；服务令牌不能用于面板登录，也不会返回给浏览器。会话保存在进程内，8小时到期或重启后失效；登录尝试与会话总数有界。
 
 面板设置只读展示公开运行参数、条目数量与凭据是否配置。模型端点和密钥由面板写回服务配置文件与私密密钥文件；公开条目、token 价格版本与缓存策略保存在题库库；钱包、预占与结算仍由 ByebyeOCS 管理。模型启停与缓存失效操作和维护审计在同一事务提交；测试前先记录操作，功能测试必须显式确认模型用量。审计默认保留180天，每批清理500行。
 
-新增迁移 `000004_panel_audit.sql` 与 `000005_offerings.sql` 必须在启动前显式执行；旧迁移不变。主平台通过服务令牌读取 `GET /internal/v1/offerings`，公开条目 UUID 与公开编号保持稳定。面板资源随正式二进制构建，不依赖 Node。真实浏览器脚本位于 `internal/platform/panel/tests/browser.test.mjs`，使用 Node.js 22或更高版本与 Chrome/Chromium，仅接收隔离夹具的回环地址。主项目的 `integration,tiku_fork` 测试可通过 `BYEBYEOCS_TIKU_PANEL_PROBE_SCRIPT` 调用该脚本；`BYEBYEOCS_TIKU_BROWSER_ARTIFACT_DIR` 可指定本地截图与报告目录。
+新增迁移 `000004_panel_audit.sql`、`000005_offerings.sql` 和 `000006_panel_pagination.sql` 必须在启动前显式执行；旧迁移不变。主平台通过服务令牌读取 `GET /internal/v1/offerings`，公开条目 UUID 与公开编号保持稳定。面板资源随正式二进制构建，不依赖 Node。真实浏览器脚本位于 `internal/platform/panel/tests/browser.test.mjs`，使用 Node.js 22或更高版本与 Chrome/Chromium，仅接收隔离夹具的回环地址。主项目的 `integration,tiku_fork` 测试可通过 `BYEBYEOCS_TIKU_PANEL_PROBE_SCRIPT` 调用该脚本；`BYEBYEOCS_TIKU_BROWSER_ARTIFACT_DIR` 可指定本地截图与报告目录。
 
 v2 请求新增可选 `cache_policy: {allow, ttl_days}`。未提供时保留旧请求格式与默认策略；提供时期限必须在1到配置上限之内。新策略按期限分开缓存，过期或超龄条目不命中；`allow=false` 禁止缓存写入并拒绝 `cache_first`。主平台把请求策略写入查询快照，旧在途行的 NULL 仍按旧协议恢复，避免恢复时改变 fork 的幂等摘要。部署时主平台与 fork 配套升级。
+
+缓存键包含实际回答及转述模型的连接、密钥摘要和有效输出预算；相关配置变化后不会复用旧答案，单纯更改显示名称不会使缓存失效。升级后旧格式缓存不会命中，按原保留策略清理；幂等请求记录和已冻结的价格不变。已产生或无法确认用量的失败标记为 `request_unknown`，写入成功的部分已确认 token 可供核对，不自动结算或重放。
 
 v1 本地兼容进程限制回环监听，管理 API 拒绝非本机 Host 和跨站来源；搜索接口保持兼容。设置返回的模型密钥遮蔽，编辑留空仅在端点和协议未变时保留旧凭据，显式移除使用 `clear_api_key`。
 

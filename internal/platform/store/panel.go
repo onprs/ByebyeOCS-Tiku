@@ -99,11 +99,30 @@ const panelFacts = `WITH facts AS (
 ) `
 
 func (s *Store) PanelRequests(ctx context.Context, filter PanelFilter) (PanelPage, error) {
-	where, args, err := panelWhere(filter, "model_id", "status")
+	requestWhere, args, err := panelWhere(filter, "q.offering_id", "COALESCE(q.status,r.state)")
 	if err != nil {
 		return PanelPage{}, err
 	}
-	statement := panelFacts + `SELECT to_jsonb(facts),created_at,id FROM facts WHERE ` + where + fmt.Sprintf(` ORDER BY created_at DESC,id DESC LIMIT $%d`, len(args))
+	queryWhere, _, err := panelWhere(filter, "q.offering_id", "q.status")
+	if err != nil {
+		return PanelPage{}, err
+	}
+	requestWhere = strings.Replace(requestWhere, "(created_at, id)", "(r.created_at, r.request_id)", 1)
+	queryWhere = strings.Replace(queryWhere, "(created_at, id)", "(q.created_at, q.request_id)", 1)
+	limit := fmt.Sprintf("$%d", len(args))
+	// 两个来源分别按索引取有限页，再合并；兼容 v1 没有幂等记录的查询。
+	statement := `WITH facts AS (
+ (SELECT r.request_id AS id,COALESCE(q.offering_id,'') AS model_id,COALESCE(q.mode,'') AS mode,
+  COALESCE(q.cache_scope,'') AS cache_scope,COALESCE(q.status,r.state) AS status,COALESCE(q.cache_hit,false) AS cache_hit,
+  COALESCE(q.usage,'{}'::jsonb) AS usage,COALESCE(q.latency_ms,0) AS latency_ms,COALESCE(r.error_code,'') AS error_code,r.created_at
+  FROM tiku.requests r LEFT JOIN tiku.queries q ON q.request_id=r.request_id WHERE ` + requestWhere + `
+  ORDER BY r.created_at DESC,r.request_id DESC LIMIT ` + limit + `)
+ UNION ALL
+ (SELECT q.request_id AS id,q.offering_id AS model_id,q.mode,q.cache_scope,q.status,q.cache_hit,q.usage,q.latency_ms,
+  '' AS error_code,q.created_at FROM tiku.queries q
+  WHERE NOT EXISTS (SELECT 1 FROM tiku.requests r WHERE r.request_id=q.request_id) AND ` + queryWhere + `
+  ORDER BY q.created_at DESC,q.request_id DESC LIMIT ` + limit + `))
+ SELECT to_jsonb(facts),created_at,id FROM facts ORDER BY created_at DESC,id DESC LIMIT ` + limit
 	return s.panelPage(ctx, statement, args, filter.Limit)
 }
 
@@ -119,17 +138,28 @@ func (s *Store) PanelRequest(ctx context.Context, id string) (json.RawMessage, e
 	return data, err
 }
 
-const panelCacheFacts = `WITH facts AS (SELECT id::text,offering_id AS model_id,scope,question_title,question_type,
+func panelUUIDWhere(filter PanelFilter, modelColumn, statusColumn string) (string, []any, error) {
+	where, args, err := panelWhere(filter, modelColumn, statusColumn)
+	if err != nil {
+		return "", nil, err
+	}
+	if filter.Cursor == "" {
+		args[1] = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	}
+	return strings.Replace(where, "(created_at, id) < ($1, $2)", "(created_at, sort_id) < ($1, $2::uuid)", 1), args, nil
+}
+
+const panelCacheFacts = `WITH facts AS (SELECT id AS sort_id,id::text,offering_id AS model_id,scope,question_title,question_type,
  answer,source_request_id,created_at,expires_at,invalidated_at,invalidation_reason,invalidated_by,
  CASE WHEN invalidated_at IS NOT NULL THEN 'invalidated' WHEN expires_at<=now() THEN 'expired' ELSE 'active' END AS status
  FROM tiku.cache_entries) `
 
 func (s *Store) PanelCache(ctx context.Context, filter PanelFilter) (PanelPage, error) {
-	where, args, err := panelWhere(filter, "model_id", "status")
+	where, args, err := panelUUIDWhere(filter, "model_id", "status")
 	if err != nil {
 		return PanelPage{}, err
 	}
-	statement := panelCacheFacts + `SELECT to_jsonb(facts),created_at,id FROM facts WHERE ` + where + fmt.Sprintf(` ORDER BY created_at DESC,id DESC LIMIT $%d`, len(args))
+	statement := panelCacheFacts + `SELECT to_jsonb(facts)-'sort_id',created_at,id FROM facts WHERE ` + where + fmt.Sprintf(` ORDER BY created_at DESC,sort_id DESC LIMIT $%d`, len(args))
 	return s.panelPage(ctx, statement, args, filter.Limit)
 }
 
@@ -142,22 +172,21 @@ func (s *Store) PanelOverview(ctx context.Context) (json.RawMessage, error) {
         COALESCE(sum(CASE WHEN usage->>'input_tokens' ~ '^[0-9]+$' THEN (usage->>'input_tokens')::bigint END),0) AS input_tokens,
         COALESCE(sum(CASE WHEN usage->>'output_tokens' ~ '^[0-9]+$' THEN (usage->>'output_tokens')::bigint END),0) AS output_tokens
  FROM tiku.queries WHERE created_at>=now()-interval '24 hours'
-), total AS (
- SELECT count(*) AS queries,
-        count(*) FILTER(WHERE cache_hit) AS cache_hits,
-        count(*) FILTER(WHERE usage->>'complete' IS DISTINCT FROM 'true') AS incomplete,
-        COALESCE(sum(CASE WHEN usage->>'input_tokens' ~ '^[0-9]+$' THEN (usage->>'input_tokens')::bigint END),0) AS input_tokens,
-        COALESCE(sum(CASE WHEN usage->>'output_tokens' ~ '^[0-9]+$' THEN (usage->>'output_tokens')::bigint END),0) AS output_tokens
- FROM tiku.queries
 ), by_model AS (
  SELECT q.offering_id AS model_id,
-        COALESCE(NULLIF(o.display_name,''),q.offering_id) AS display_name,
+        q.offering_id AS display_name,
         count(*) AS queries,
         count(*) FILTER(WHERE q.cache_hit) AS cache_hits,
+        count(*) FILTER(WHERE q.usage->>'complete' IS DISTINCT FROM 'true') AS incomplete,
         COALESCE(sum(CASE WHEN q.usage->>'input_tokens' ~ '^[0-9]+$' THEN (q.usage->>'input_tokens')::bigint END),0) AS input_tokens,
         COALESCE(sum(CASE WHEN q.usage->>'output_tokens' ~ '^[0-9]+$' THEN (q.usage->>'output_tokens')::bigint END),0) AS output_tokens
- FROM tiku.queries q LEFT JOIN tiku.offerings o ON o.public_id=q.offering_id
- GROUP BY q.offering_id,o.display_name
+ FROM tiku.queries q
+ GROUP BY q.offering_id
+), total AS (
+ SELECT COALESCE(sum(queries),0) AS queries,COALESCE(sum(cache_hits),0) AS cache_hits,
+        COALESCE(sum(incomplete),0) AS incomplete,COALESCE(sum(input_tokens),0) AS input_tokens,
+        COALESCE(sum(output_tokens),0) AS output_tokens
+ FROM by_model
 ), coverage AS (
  SELECT count(*) AS published,
         count(*) FILTER(WHERE pricing IS NOT NULL AND pricing->>'input_micros_per_million_tokens' IS NOT NULL) AS priced
@@ -182,12 +211,12 @@ SELECT jsonb_build_object(
 }
 
 func (s *Store) PanelAudit(ctx context.Context, filter PanelFilter) (PanelPage, error) {
-	where, args, err := panelWhere(filter, "resource_id", "action")
+	where, args, err := panelUUIDWhere(filter, "resource_id", "action")
 	if err != nil {
 		return PanelPage{}, err
 	}
-	statement := `WITH facts AS (SELECT id::text,actor,action,resource_id,detail,created_at FROM tiku.panel_audit)
- SELECT to_jsonb(facts),created_at,id FROM facts WHERE ` + where + fmt.Sprintf(` ORDER BY created_at DESC,id DESC LIMIT $%d`, len(args))
+	statement := `WITH facts AS (SELECT id AS sort_id,id::text,actor,action,resource_id,detail,created_at FROM tiku.panel_audit)
+ SELECT to_jsonb(facts)-'sort_id',created_at,id FROM facts WHERE ` + where + fmt.Sprintf(` ORDER BY created_at DESC,sort_id DESC LIMIT $%d`, len(args))
 	return s.panelPage(ctx, statement, args, filter.Limit)
 }
 

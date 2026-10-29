@@ -1,8 +1,10 @@
 package panel
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/onprs/OCS-Tiku/internal/platform/answer"
 	"github.com/onprs/OCS-Tiku/internal/platform/catalog"
@@ -15,7 +17,7 @@ func (s *Server) offerings(w http.ResponseWriter, r *http.Request, current sessi
 		fail(w, 503, "service_unavailable", "暂时无法读取公开模型条目，请稍后重试")
 		return
 	}
-	jsonResponse(w, 200, map[string]any{"items": items})
+	jsonResponse(w, 200, map[string]any{"items": items, "cache_max_ttl_days": s.cfg.Cache.MaxTTLDays, "shared_cache_enabled": s.cfg.Cache.SharedEnabled})
 }
 
 func (s *Server) offering(w http.ResponseWriter, r *http.Request, current session) {
@@ -37,15 +39,13 @@ func (s *Server) createOffering(w http.ResponseWriter, r *http.Request, current 
 	if !decode(w, r, &input) {
 		return
 	}
+	s.catalogMu.Lock()
+	defer s.catalogMu.Unlock()
 	created, err := s.catalog.Create(r.Context(), current.Username, input)
 	if err != nil {
 		offeringFailure(w, err)
 		return
 	}
-	_ = s.store.PanelRecordAudit(r.Context(), current.Username, "offering.create", created.PublicID, map[string]any{
-		"provider_ref": created.ProviderRef, "enabled": created.Enabled, "is_default": created.Default,
-		"price_version": created.PriceVersion,
-	})
 	jsonResponse(w, 201, created)
 }
 
@@ -66,15 +66,13 @@ func (s *Server) updateOffering(w http.ResponseWriter, r *http.Request, current 
 		fail(w, 422, "validation_failed", "请提供条目版本")
 		return
 	}
+	s.catalogMu.Lock()
+	defer s.catalogMu.Unlock()
 	updated, err := s.catalog.Update(r.Context(), current.Username, id, input.Version, input.Input)
 	if err != nil {
 		offeringFailure(w, err)
 		return
 	}
-	_ = s.store.PanelRecordAudit(r.Context(), current.Username, "offering.update", updated.PublicID, map[string]any{
-		"provider_ref": updated.ProviderRef, "enabled": updated.Enabled, "is_default": updated.Default,
-		"price_version": updated.PriceVersion,
-	})
 	jsonResponse(w, 200, updated)
 }
 
@@ -109,14 +107,11 @@ func (s *Server) retireOffering(w http.ResponseWriter, r *http.Request, current 
 		fail(w, 422, "validation_failed", "请提供条目版本")
 		return
 	}
-	updated, err := s.catalog.Retire(r.Context(), id, input.Version)
+	updated, err := s.catalog.Retire(r.Context(), current.Username, id, input.Version)
 	if err != nil {
 		offeringFailure(w, err)
 		return
 	}
-	_ = s.store.PanelRecordAudit(r.Context(), current.Username, "offering.retire", updated.PublicID, map[string]any{
-		"provider_ref": updated.ProviderRef, "price_version": updated.PriceVersion,
-	})
 	jsonResponse(w, 200, updated)
 }
 
@@ -159,9 +154,14 @@ func (s *Server) testOffering(w http.ResponseWriter, r *http.Request, current se
 		fail(w, e.HTTPStatus, e.Code, e.Message)
 		return
 	}
-	_ = s.store.PanelRecordAudit(r.Context(), current.Username, "offering.test.result", id, map[string]any{
+	persist, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	if err := s.store.PanelRecordAudit(persist, current.Username, "offering.test.result", id, map[string]any{
 		"kind": input.Kind, "status": result.Status, "error_code": result.ErrorCode, "provider_ref": item.ProviderRef,
-	})
+	}); err != nil {
+		fail(w, 503, "audit_unavailable", "测试已结束，记录暂时不可用，请查看最近测试结果")
+		return
+	}
 	jsonResponse(w, 200, result)
 }
 

@@ -81,7 +81,7 @@ try {
     assert.equal(await evaluate(`!!document.querySelector('#page .error-state')`), false, '页面加载失败：' + route);
   };
   const screenshot = async name => {
-    await evaluate(`Promise.all(document.getAnimations().filter(value => value.effect?.getTiming().iterations !== Infinity).map(value => value.finished))`);
+    await evaluate(`Promise.allSettled(document.getAnimations().filter(value => value.effect?.getTiming().iterations !== Infinity).map(value => value.finished))`);
     const image = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
     await fs.writeFile(path.join(artifacts, name + '.png'), Buffer.from(image.data, 'base64'));
   };
@@ -102,33 +102,65 @@ try {
   await navigate('offerings', '模型与价格');
   await wait(`!!document.querySelector('.model-grid')`);
   const leaked = await evaluate(`(async () => {
-    const responses = await Promise.all(['/models','/offerings','/settings'].map(value=>fetch('/panel/api'+value).then(response=>response.text())));
+    const responses = await Promise.all(['/models','/providers','/offerings','/settings'].map(value=>fetch('/panel/api'+value).then(response=>response.text())));
     return responses.some(value=>['isolated-upstream-key','isolated-fork-service-token','password_hash_file','api_key_file','service_token_file'].some(secret=>value.includes(secret)));
   })()`);
   assert.equal(leaked, false, '设置响应包含私密配置');
   await click('停用');
-  await wait(`document.querySelector('.model-grid .card .model-name .status')?.textContent === '模型已停用'`);
+  await wait(`document.querySelector('.model-grid .card .model-name .status')?.textContent === '已停用'`);
   await click('启用');
-  await wait(`document.querySelector('.model-grid .card .model-name .status')?.textContent === '已发布'`);
+  await wait(`document.querySelector('.model-grid .card .model-name .status')?.textContent === '已启用'`);
+  const tab = label => evaluate(`([...document.querySelectorAll('[role=tab]')].find(value=>value.textContent.startsWith(${JSON.stringify(label)})) || (()=>{throw new Error('缺少选项卡')})()).click()`);
+  await tab('公开价格');
+  await wait(`document.querySelector('[role=tab][aria-selected=true]')?.textContent.startsWith('公开价格') && !document.querySelector('#page.is-loading')`);
+  assert.ok(await evaluate(`document.querySelectorAll('.model-grid .card').length`) >= 3, '同一模型的公开条目没有全部展示');
   await click('编辑');
   await wait(`!!document.querySelector('dialog input[name=display_name]')`);
-  assert.equal(await evaluate(`!!document.querySelector('dialog input[name=input_price]') && !!document.querySelector('dialog input[name=cache_ttl_days]')`), true, '公开条目编辑缺少价格或缓存字段');
-  await evaluate(`(() => {const field=document.querySelector('dialog input[name=display_name]');field.value='浏览器核对公开模型';})()`);
+  assert.equal(await evaluate(`!!document.querySelector('dialog input[name=input_price]') && !!document.querySelector('dialog input[name=cache_ttl_days]') && !!document.querySelector('dialog select[aria-label=关联模型]')`), true, '公开条目编辑缺少模型、价格或缓存字段');
+  await evaluate(`(() => {const field=document.querySelector('dialog input[name=display_name]');field.value='浏览器核对公开模型';const model=document.querySelector('dialog select[aria-label=关联模型]');model.value='alternate';model.dispatchEvent(new Event('change'));})()`);
   await click('保存');
   await wait(`!document.querySelector('dialog') && document.querySelector('#page')?.textContent.includes('浏览器核对公开模型')`);
-  await click('新增上游模型');
+  await screenshot('public-offerings-desktop');
+  await tab('提供商');
+  await wait(`document.querySelector('[role=tab][aria-selected=true]')?.textContent.startsWith('提供商') && !document.querySelector('#page.is-loading')`);
+  await click('新增提供商');
   await wait(`!!document.querySelector('dialog input[name=id]')`);
-  assert.equal(await evaluate(`document.querySelector('dialog button[type=submit]').form === document.querySelector('dialog form')`), true, '固定操作栏没有关联模型表单');
+  assert.equal(await evaluate(`document.querySelector('dialog button[type=submit]').form === document.querySelector('dialog form')`), true, '固定操作栏没有关联提供商表单');
   await evaluate(`document.querySelector('dialog [role=combobox][aria-label=接入协议]').focus()`);
   await key('ArrowDown', 'ArrowDown', 40);
   await wait(`!!document.querySelector('[role=listbox]')`);
   await key('Escape', 'Escape', 27);
   assert.equal(await evaluate(`!!document.querySelector('dialog') && !document.querySelector('[role=listbox]') && document.activeElement.getAttribute('role') === 'combobox'`), true, 'Esc 应只关闭选项并恢复焦点');
-  assert.equal(await evaluate(`(() => {const footer=document.querySelector('dialog .dialog-actions').getBoundingClientRect();return footer.top >= 0 && footer.bottom <= innerHeight;})()`), true, '模型编辑操作栏不在视口内');
+  assert.equal(await evaluate(`(() => {const footer=document.querySelector('dialog .dialog-actions').getBoundingClientRect();return footer.top >= 0 && footer.bottom <= innerHeight;})()`), true, '提供商编辑操作栏不在视口内');
   await evaluate(`(() => {
-    const set=(name,value)=>{const input=document.querySelector('dialog [name='+name+']');input.value=value;};
-    set('id','browser-model');set('display_name','浏览器上游模型');set('base_url','https://models.example.com/v1');
-    set('upstream_model','browser-upstream');set('api_key','browser-secret-key');
+    const set=(name,value)=>{document.querySelector('dialog [name='+name+']').value=value;};
+    set('id','browser-provider');set('name','浏览器提供商');set('base_url','https://models.example.com/v1');set('api_key','browser-secret-key');
+  })()`);
+  await click('添加提供商');
+  await wait(`document.querySelector('#page')?.textContent.includes('浏览器提供商') && !document.querySelector('dialog')`);
+  for (const width of [320, 390, 768, 1024, 1280, 1440]) {
+    await call('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width <= 390 });
+    const layout = await evaluate(`(() => {
+      const row=document.querySelector('.provider-row');
+      const meta=row.querySelector('.provider-meta').getBoundingClientRect();
+      const address=row.querySelector('.provider-address').getBoundingClientRect();
+      return { overlap: meta.left < address.right && address.left < meta.right && meta.top < address.bottom && address.top < meta.bottom,
+        overflow: document.documentElement.scrollWidth > innerWidth + 1 };
+    })()`);
+    assert.equal(layout.overlap, false, '提供商地址与状态重叠：' + width);
+    assert.equal(layout.overflow, false, '提供商页面横向溢出：' + width);
+    await screenshot('providers-' + width);
+  }
+  await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await screenshot('providers-desktop');
+  await tab('模型');
+  await wait(`document.querySelector('[role=tab][aria-selected=true]')?.textContent.startsWith('模型') && !document.querySelector('#page.is-loading')`);
+  await click('新增上游模型');
+  await wait(`!!document.querySelector('dialog input[name=id]')`);
+  await evaluate(`(() => {
+    const set=(name,value)=>{document.querySelector('dialog [name='+name+']').value=value;};
+    set('id','browser-model');set('display_name','浏览器上游模型');set('upstream_model','browser-upstream');
+    const provider=document.querySelector('dialog select[aria-label=提供商]');provider.value='browser-provider';provider.dispatchEvent(new Event('change'));
   })()`);
   await click('添加模型');
   await wait(`document.querySelector('#page')?.textContent.includes('浏览器上游模型') && !document.querySelector('dialog')`);
@@ -141,6 +173,12 @@ try {
   await wait(`!!document.querySelector('dialog')`);
   await evaluate(`document.querySelector('dialog .dialog-actions button.danger')?.click()`);
   await wait(`!document.querySelector('#page')?.textContent.includes('browser-model')`);
+  await tab('提供商');
+  await wait(`document.querySelector('#page')?.textContent.includes('browser-provider') && !document.querySelector('#page.is-loading')`);
+  await click('删除'); await click('删除提供商');
+  await wait(`!document.querySelector('#page')?.textContent.includes('browser-provider') && !document.querySelector('dialog')`);
+  await tab('模型');
+  await wait(`document.querySelector('[role=tab][aria-selected=true]')?.textContent.startsWith('模型') && !document.querySelector('#page.is-loading')`);
   await click('功能测试');
   await wait(`!!document.querySelector('dialog')`);
   assert.equal(await evaluate(`[...document.querySelectorAll('dialog button')].find(value=>value.textContent==='开始测试').disabled`), true, '功能测试未经确认就可发起');
@@ -202,7 +240,7 @@ try {
   await click('退出登录');
   await login('viewer');
   await navigate('offerings', '模型与价格');
-  assert.equal(await evaluate('document.querySelectorAll(".model-actions").length'), 0, '只读账号出现写操作');
+  assert.equal(await evaluate(`!![...document.querySelectorAll('#page button')].find(value=>['新增上游模型','新增提供商','发布','编辑配置','删除模型'].includes(value.textContent.trim()))`), false, '只读账号出现写操作');
   const viewerWrite = await evaluate(`(async()=>{const session=await fetch('/panel/api/session').then(value=>value.json());return (await fetch('/panel/api/models/primary',{method:'PATCH',headers:{'Content-Type':'application/json','X-CSRF-Token':session.csrf_token},body:JSON.stringify({enabled:false})})).status})()`);
   assert.equal(viewerWrite, 403, '只读账号绕过了服务端权限');
   await click('退出登录');

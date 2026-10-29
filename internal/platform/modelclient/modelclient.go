@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"time"
 
@@ -93,7 +94,8 @@ func NewWithOptions(opts Options) (*Client, error) {
 		TLSClientConfig:       tlsConfig,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 85 * time.Second,
-		MaxIdleConns:          16,
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       60 * time.Second,
 	}
 	httpClient := &http.Client{
@@ -157,31 +159,69 @@ func (b *boundedBody) Read(buffer []byte) (int, error) {
 
 func (b *boundedBody) Close() error { return b.body.Close() }
 
+var blockedUpstreamRanges = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 func guardedDial(dialer *net.Dialer, allowLoopback bool) func(context.Context, string, string) (net.Conn, error) {
+	return guardedDialWith(net.DefaultResolver.LookupIPAddr, dialer.DialContext, allowLoopback)
+}
+
+func guardedDialWith(resolve func(context.Context, string) ([]net.IPAddr, error), dial func(context.Context, string, string) (net.Conn, error), allowLoopback bool) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, errors.New("上游地址无效")
 		}
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		ips, err := resolve(ctx, host)
 		if err != nil || len(ips) == 0 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, errors.New("上游地址无法解析")
 		}
+		attempted := false
 		for _, item := range ips {
-			ip := item.IP
-			if ip.IsLoopback() {
-				if allowLoopback {
-					return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-				}
+			if !allowedUpstreamIP(item.IP, allowLoopback) {
 				continue
 			}
-			if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-				continue
+			attempted = true
+			conn, err := dial(ctx, network, net.JoinHostPort(item.IP.String(), port))
+			if err == nil {
+				return conn, nil
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+		if attempted {
+			return nil, errors.New("无法连接上游地址")
 		}
 		return nil, errors.New("上游地址不可访问")
 	}
+}
+
+func allowedUpstreamIP(ip net.IP, allowLoopback bool) bool {
+	if ip.IsLoopback() {
+		return allowLoopback
+	}
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	for _, prefix := range blockedUpstreamRanges {
+		if prefix.Contains(addr.Unmap()) {
+			return false
+		}
+	}
+	return true
 }
 
 // Chat 执行一次非流式模型调用。调用方负责超时；本函数不自动重试。
@@ -224,7 +264,17 @@ func usageFromEngine(usage engine.TokenUsage) TokenUsage {
 		return TokenUsage{}
 	}
 	input, output, total := usage.InputTokens, usage.OutputTokens, usage.TotalTokens
-	return TokenUsage{InputTokens: &input, OutputTokens: &output, TotalTokens: &total, Complete: usage.Complete}
+	result := TokenUsage{Complete: usage.Complete && input >= 0 && output >= 0 && total >= 0}
+	if input >= 0 {
+		result.InputTokens = &input
+	}
+	if output >= 0 {
+		result.OutputTokens = &output
+	}
+	if total >= 0 {
+		result.TotalTokens = &total
+	}
+	return result
 }
 
 func mapError(err error) error {
@@ -259,6 +309,8 @@ func safeMessage(code string) string {
 		return "模型响应超过大小上限"
 	case "invalid_request":
 		return "模型请求参数无效"
+	case "unsupported_protocol":
+		return "该协议不支持无用量连通测试"
 	default:
 		return "模型服务不可用"
 	}

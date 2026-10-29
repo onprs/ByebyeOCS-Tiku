@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -55,14 +56,24 @@ type Cache struct {
 	SharedEnabled bool `json:"shared_enabled"`
 }
 
+type Provider struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Protocol   string `json:"protocol"`
+	Vendor     string `json:"vendor,omitempty"`
+	BaseURL    string `json:"base_url"`
+	APIKeyFile string `json:"api_key_file,omitempty"`
+}
+
 type Model struct {
 	ID              string `json:"id"`
+	ProviderID      string `json:"provider_id,omitempty"`
 	DisplayName     string `json:"display_name"`
-	Protocol        string `json:"protocol"`
-	Vendor          string `json:"vendor"`
-	BaseURL         string `json:"base_url"`
+	Protocol        string `json:"protocol,omitempty"`
+	Vendor          string `json:"vendor,omitempty"`
+	BaseURL         string `json:"base_url,omitempty"`
 	Model           string `json:"model"`
-	APIKeyFile      string `json:"api_key_file"`
+	APIKeyFile      string `json:"api_key_file,omitempty"`
 	Vision          bool   `json:"vision"`
 	ToolCall        bool   `json:"tool_call"`
 	Reasoning       bool   `json:"reasoning"`
@@ -85,21 +96,22 @@ type Panel struct {
 
 type Config struct {
 	// SourcePath 是实际读取的配置文件路径，仅供维护面板原子回写；不参与 JSON。
-	SourcePath             string  `json:"-"`
-	Listen                 string  `json:"listen"`
-	DatabaseMaxConnections int32   `json:"database_max_connections"`
-	DatabaseDSNFile        string  `json:"database_dsn_file"`
-	ServiceTokenFile       string  `json:"service_token_file"`
-	UpstreamCAFile         string  `json:"upstream_ca_file"`
-	DefaultModelID         string  `json:"default_model_id"`
-	CaptionModelID         string  `json:"caption_model_id"`
-	AllowLoopbackUpstreams bool    `json:"allow_loopback_upstreams"`
-	PromptVersion          string  `json:"prompt_version"`
-	NormalizationVersion   string  `json:"normalization_version"`
-	Limits                 Limits  `json:"limits"`
-	Cache                  Cache   `json:"cache"`
-	Models                 []Model `json:"models"`
-	Panel                  Panel   `json:"panel"`
+	SourcePath             string     `json:"-"`
+	Listen                 string     `json:"listen"`
+	DatabaseMaxConnections int32      `json:"database_max_connections"`
+	DatabaseDSNFile        string     `json:"database_dsn_file"`
+	ServiceTokenFile       string     `json:"service_token_file"`
+	UpstreamCAFile         string     `json:"upstream_ca_file"`
+	DefaultModelID         string     `json:"default_model_id"`
+	CaptionModelID         string     `json:"caption_model_id"`
+	AllowLoopbackUpstreams bool       `json:"allow_loopback_upstreams"`
+	PromptVersion          string     `json:"prompt_version"`
+	NormalizationVersion   string     `json:"normalization_version"`
+	Limits                 Limits     `json:"limits"`
+	Cache                  Cache      `json:"cache"`
+	Providers              []Provider `json:"providers,omitempty"`
+	Models                 []Model    `json:"models"`
+	Panel                  Panel      `json:"panel"`
 }
 
 func applyDefaults(c *Config) {
@@ -143,7 +155,7 @@ func applyDefaults(c *Config) {
 		c.NormalizationVersion = "fork-n1"
 	}
 	for i := range c.Models {
-		if c.Models[i].Protocol == "" {
+		if c.Models[i].Protocol == "" && c.Models[i].ProviderID == "" {
 			c.Models[i].Protocol = engine.ProtocolOpenAIChat
 		}
 	}
@@ -158,7 +170,7 @@ func Load(path string) (*Config, error) {
 	var c Config
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&c); err != nil {
+	if err := decoder.Decode(&c); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return nil, errors.New("配置文件 JSON 无效或包含未知字段")
 	}
 	absolute, err := filepath.Abs(path)
@@ -170,6 +182,11 @@ func Load(path string) (*Config, error) {
 	for _, field := range []*string{&c.DatabaseDSNFile, &c.ServiceTokenFile, &c.UpstreamCAFile} {
 		if *field != "" && !filepath.IsAbs(*field) {
 			*field = filepath.Join(directory, *field)
+		}
+	}
+	for index := range c.Providers {
+		if value := c.Providers[index].APIKeyFile; value != "" && !filepath.IsAbs(value) {
+			c.Providers[index].APIKeyFile = filepath.Join(directory, value)
 		}
 	}
 	for index := range c.Models {
@@ -186,6 +203,7 @@ func Load(path string) (*Config, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
+	c.resolveProviders()
 	return &c, nil
 }
 
@@ -261,9 +279,29 @@ func (c *Config) Validate() error {
 			return errors.New("维护面板至少需要一个维护员账号")
 		}
 	}
+	providers := make(map[string]Provider, len(c.Providers))
+	for _, provider := range c.Providers {
+		if !modelIDPattern.MatchString(provider.ID) || providers[provider.ID].ID != "" {
+			return errors.New("提供商标识无效或重复")
+		}
+		if strings.TrimSpace(provider.Name) == "" {
+			return fmt.Errorf("提供商 %q 缺少名称", provider.ID)
+		}
+		if err := validateConnection(provider.Protocol, provider.BaseURL, provider.APIKeyFile, c.AllowLoopbackUpstreams); err != nil {
+			return fmt.Errorf("提供商 %q: %w", provider.ID, err)
+		}
+		providers[provider.ID] = provider
+	}
 	seen := make(map[string]bool, len(c.Models))
 	for i := range c.Models {
-		m := &c.Models[i]
+		m := c.Models[i]
+		if m.ProviderID != "" {
+			provider, ok := providers[m.ProviderID]
+			if !ok {
+				return fmt.Errorf("模型条目 %q 引用的提供商不存在", m.ID)
+			}
+			m.Protocol, m.BaseURL, m.APIKeyFile = provider.Protocol, provider.BaseURL, provider.APIKeyFile
+		}
 		if !modelIDPattern.MatchString(m.ID) {
 			return fmt.Errorf("模型条目 %d 的 id 无效", i+1)
 		}
@@ -274,24 +312,11 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(m.DisplayName) == "" {
 			return fmt.Errorf("模型条目 %q 缺少 display_name", m.ID)
 		}
-		if m.Model == "" {
+		if strings.TrimSpace(m.Model) == "" {
 			return fmt.Errorf("模型条目 %q 缺少 model", m.ID)
 		}
-		validProtocol := false
-		for _, protocol := range engine.Protocols {
-			if m.Protocol == protocol {
-				validProtocol = true
-				break
-			}
-		}
-		if !validProtocol {
-			return fmt.Errorf("模型条目 %q 的 protocol 无效", m.ID)
-		}
-		if err := validateBaseURL(m.BaseURL, c.AllowLoopbackUpstreams); err != nil {
+		if err := validateConnection(m.Protocol, m.BaseURL, m.APIKeyFile, c.AllowLoopbackUpstreams); err != nil {
 			return fmt.Errorf("模型条目 %q: %w", m.ID, err)
-		}
-		if m.APIKeyFile == "" && m.Protocol != engine.ProtocolOllamaChat {
-			return fmt.Errorf("模型条目 %q 缺少 api_key_file", m.ID)
 		}
 		if m.Context < 0 || m.Context > 10_000_000 {
 			return fmt.Errorf("模型条目 %q 的 context 无效", m.ID)
@@ -307,6 +332,40 @@ func (c *Config) Validate() error {
 		return errors.New("caption_model_id 未在 models 中定义")
 	}
 	return nil
+}
+
+func validateConnection(protocol, baseURL, keyFile string, allowLoopback bool) error {
+	valid := false
+	for _, candidate := range engine.Protocols {
+		if protocol == candidate {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return errors.New("protocol 无效")
+	}
+	if err := validateBaseURL(baseURL, allowLoopback); err != nil {
+		return err
+	}
+	if keyFile == "" && protocol != engine.ProtocolOllamaChat {
+		return errors.New("缺少 api_key_file")
+	}
+	return nil
+}
+
+// resolveProviders 只填充运行时快照；持久化时模型仍只保存提供商引用。
+func (c *Config) resolveProviders() {
+	providers := make(map[string]Provider, len(c.Providers))
+	for _, provider := range c.Providers {
+		providers[provider.ID] = provider
+	}
+	for i := range c.Models {
+		if provider, ok := providers[c.Models[i].ProviderID]; ok {
+			c.Models[i].Protocol, c.Models[i].Vendor = provider.Protocol, provider.Vendor
+			c.Models[i].BaseURL, c.Models[i].APIKeyFile = provider.BaseURL, provider.APIKeyFile
+		}
+	}
 }
 
 func validateBaseURL(raw string, allowLoopback bool) error {
@@ -336,6 +395,8 @@ func isLoopbackHost(host string) bool {
 // LoadModelKeys 读取模型密钥文件；非 Ollama 模型必须有可用密钥。
 func LoadModelKeys(items []Model) (map[string]string, error) {
 	keys := make(map[string]string, len(items))
+	// 同一提供商的模型可以共享密钥文件，避免重复读取。
+	files := make(map[string]string)
 	for _, model := range items {
 		if model.APIKeyFile == "" {
 			if model.Protocol != engine.ProtocolOllamaChat {
@@ -344,11 +405,15 @@ func LoadModelKeys(items []Model) (map[string]string, error) {
 			keys[model.ID] = ""
 			continue
 		}
-		key, err := ReadSecretFile(model.APIKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("模型条目 %q 的密钥文件不可用", model.ID)
+		key, ok := files[model.APIKeyFile]
+		if !ok {
+			var err error
+			key, err = ReadSecretFile(model.APIKeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("模型条目 %q 的密钥文件不可用", model.ID)
+			}
+			files[model.APIKeyFile] = key
 		}
-		// 同一供应商的多个模型可以复用同一密钥值；每个模型仍使用独立私密文件。
 		keys[model.ID] = key
 	}
 	return keys, nil
@@ -356,9 +421,17 @@ func LoadModelKeys(items []Model) (map[string]string, error) {
 
 // ReadSecretFile 读取密钥或服务令牌文件，限制长度并去除首尾空白。
 func ReadSecretFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return "", errors.New("无法读取密钥文件")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 4098))
+	if err != nil {
+		return "", errors.New("无法读取密钥文件")
+	}
+	if len(data) > 4097 {
+		return "", errors.New("密钥文件内容过长")
 	}
 	value := strings.TrimSpace(string(data))
 	if value == "" {
