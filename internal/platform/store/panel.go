@@ -172,15 +172,25 @@ func (s *Store) PanelOverview(ctx context.Context) (json.RawMessage, error) {
         COALESCE(sum(CASE WHEN usage->>'input_tokens' ~ '^[0-9]+$' THEN (usage->>'input_tokens')::bigint END),0) AS input_tokens,
         COALESCE(sum(CASE WHEN usage->>'output_tokens' ~ '^[0-9]+$' THEN (usage->>'output_tokens')::bigint END),0) AS output_tokens
  FROM tiku.queries WHERE created_at>=now()-interval '24 hours'
+), daily AS (
+ SELECT to_char(d.day,'YYYY-MM-DD') AS date,
+        count(q.request_id) AS queries,
+        count(q.request_id) FILTER(WHERE q.cache_hit) AS cache_hits,
+        count(q.request_id) FILTER(WHERE q.usage->>'complete' IS DISTINCT FROM 'true') AS incomplete
+ FROM generate_series(date_trunc('day', now()) - interval '13 days', date_trunc('day', now()), interval '1 day') AS d(day)
+ LEFT JOIN tiku.queries q ON q.created_at >= d.day AND q.created_at < d.day + interval '1 day'
+ GROUP BY d.day
+ ORDER BY d.day
 ), by_model AS (
  SELECT q.offering_id AS model_id,
-        q.offering_id AS display_name,
+        COALESCE(max(o.display_name), q.offering_id) AS display_name,
         count(*) AS queries,
         count(*) FILTER(WHERE q.cache_hit) AS cache_hits,
         count(*) FILTER(WHERE q.usage->>'complete' IS DISTINCT FROM 'true') AS incomplete,
         COALESCE(sum(CASE WHEN q.usage->>'input_tokens' ~ '^[0-9]+$' THEN (q.usage->>'input_tokens')::bigint END),0) AS input_tokens,
         COALESCE(sum(CASE WHEN q.usage->>'output_tokens' ~ '^[0-9]+$' THEN (q.usage->>'output_tokens')::bigint END),0) AS output_tokens
  FROM tiku.queries q
+ LEFT JOIN tiku.offerings o ON o.public_id = q.offering_id
  GROUP BY q.offering_id
 ), total AS (
  SELECT COALESCE(sum(queries),0) AS queries,COALESCE(sum(cache_hits),0) AS cache_hits,
@@ -200,6 +210,8 @@ SELECT jsonb_build_object(
  'output_tokens',(SELECT output_tokens FROM recent),
  'all_time',(SELECT jsonb_build_object('queries',queries,'cache_hits',cache_hits,'incomplete',incomplete,
    'input_tokens',input_tokens,'output_tokens',output_tokens) FROM total),
+ 'daily',COALESCE((SELECT jsonb_agg(jsonb_build_object('date',date,'queries',queries,'cache_hits',cache_hits,'incomplete',incomplete)
+   ORDER BY date) FROM daily),'[]'::jsonb),
  'by_model',COALESCE((SELECT jsonb_agg(jsonb_build_object('model_id',model_id,'display_name',display_name,
    'queries',queries,'cache_hits',cache_hits,'input_tokens',input_tokens,'output_tokens',output_tokens)
    ORDER BY queries DESC,model_id) FROM by_model),'[]'::jsonb),

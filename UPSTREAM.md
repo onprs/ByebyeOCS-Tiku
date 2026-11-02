@@ -77,11 +77,11 @@ go test -tags ocs_frontend .
 
 ## 正式维护面板与缓存策略
 
-正式面板默认关闭，启用后使用配置中独立维护账号登录；`maintainer` 可维护提供商、模型、公开条目与价格版本、缓存策略、模型测试和缓存失效，`viewer` 只读。提供商负责协议、地址及密钥，多个模型可引用同一提供商；旧的模型内嵌连接配置继续可用。元数据原子写回配置文件，密钥写入同目录 `secrets/` 的 0600 文件，保存后通过运行时注册表热加载。使用需要密钥的协议时，更改地址或协议需要重新提供密钥；失败的配置不会覆盖原密钥。密码以私密文件中的 bcrypt 哈希配置，使用 `panel-password` 从标准输入或私密文件生成。面板采用 HttpOnly、SameSite=Strict Cookie 和 CSRF 校验，写操作校验精确来源；服务令牌不能用于面板登录，也不会返回给浏览器。会话保存在进程内，8小时到期或重启后失效；登录尝试与会话总数有界。
+正式面板默认关闭，启用后使用配置中独立维护账号登录；`maintainer` 可维护提供商、模型、公开条目价格与缓存策略、模型测试和缓存失效，也可下架或单独删除公开条目，`viewer` 只读。提供商负责协议、地址及密钥，多个模型可引用同一提供商；旧的模型内嵌连接配置继续可用。维护员可测试提供商连接并读取服务端模型目录，在模型表单中搜索选择上游模型或手动录入；目录结果按原题库模型库匹配显示名、上下文与能力。可见公开条目发布前必须通过服务端无 token 连通检查，费率版本自动维护并保存价格快照。新增提供商只需名称，内部标识自动生成。元数据原子写回配置文件，密钥写入同目录 `secrets/` 的 0600 文件，保存后通过运行时注册表热加载。使用需要密钥的协议时，更改地址或协议需要重新提供密钥；失败的配置不会覆盖原密钥。密码以私密文件中的 bcrypt 哈希配置，使用 `panel-password` 从标准输入或私密文件生成。面板采用 HttpOnly、SameSite=Strict Cookie 和 CSRF 校验，写操作校验精确来源；服务令牌不能用于面板登录，也不会返回给浏览器。会话保存在进程内，8小时到期或重启后失效；登录尝试与会话总数有界。
 
 面板设置只读展示公开运行参数、条目数量与凭据是否配置。模型端点和密钥由面板写回服务配置文件与私密密钥文件；公开条目、token 价格版本与缓存策略保存在题库库；钱包、预占与结算仍由 ByebyeOCS 管理。模型启停与缓存失效操作和维护审计在同一事务提交；测试前先记录操作，功能测试必须显式确认模型用量。审计默认保留180天，每批清理500行。
 
-新增迁移 `000004_panel_audit.sql`、`000005_offerings.sql` 和 `000006_panel_pagination.sql` 必须在启动前显式执行；旧迁移不变。主平台通过服务令牌读取 `GET /internal/v1/offerings`，公开条目 UUID 与公开编号保持稳定。面板资源随正式二进制构建，不依赖 Node。真实浏览器脚本位于 `internal/platform/panel/tests/browser.test.mjs`，使用 Node.js 22或更高版本与 Chrome/Chromium，仅接收隔离夹具的回环地址。主项目的 `integration,tiku_fork` 测试可通过 `BYEBYEOCS_TIKU_PANEL_PROBE_SCRIPT` 调用该脚本；`BYEBYEOCS_TIKU_BROWSER_ARTIFACT_DIR` 可指定本地截图与报告目录。
+新增迁移 `000004_panel_audit.sql`、`000005_offerings.sql`、`000006_panel_pagination.sql`、`000007_one_offering_per_model.sql` 和 `000008_offering_deletion.sql` 必须在启动前显式执行；第7版建立上游模型与公开条目的一对一绑定，第8版支持删除当前公开条目并释放绑定，数据库条目、不可变价格版本和既有账务快照保留；旧迁移不变。主平台通过服务令牌读取 `GET /internal/v1/offerings`，公开条目 UUID 与公开编号保持稳定。面板资源随正式二进制构建，不依赖 Node。真实浏览器脚本位于 `internal/platform/panel/tests/browser.test.mjs`，使用 Node.js 22或更高版本与 Chrome/Chromium，仅接收隔离夹具的回环地址。主项目的 `integration,tiku_fork` 测试可通过 `BYEBYEOCS_TIKU_PANEL_PROBE_SCRIPT` 调用该脚本；`BYEBYEOCS_TIKU_BROWSER_ARTIFACT_DIR` 可指定本地截图与报告目录。
 
 v2 请求新增可选 `cache_policy: {allow, ttl_days}`。未提供时保留旧请求格式与默认策略；提供时期限必须在1到配置上限之内。新策略按期限分开缓存，过期或超龄条目不命中；`allow=false` 禁止缓存写入并拒绝 `cache_first`。主平台把请求策略写入查询快照，旧在途行的 NULL 仍按旧协议恢复，避免恢复时改变 fork 的幂等摘要。部署时主平台与 fork 配套升级。
 

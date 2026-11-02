@@ -81,6 +81,25 @@ func (e *Editor) Providers() []config.Provider {
 	return append([]config.Provider(nil), e.providers...)
 }
 
+// ProviderConnection 返回提供商连接快照及服务端读取的密钥；密钥只供内部上游请求使用。
+func (e *Editor) ProviderConnection(id string) (config.Provider, string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	index := providerIndex(e.providers, id)
+	if index < 0 {
+		return config.Provider{}, "", ErrNotFound
+	}
+	provider := e.providers[index]
+	if provider.APIKeyFile == "" {
+		return provider, "", nil
+	}
+	key, err := config.ReadSecretFile(provider.APIKeyFile)
+	if err != nil {
+		return config.Provider{}, "", errors.New("提供商密钥不可用")
+	}
+	return provider, key, nil
+}
+
 func providerIndex(items []config.Provider, id string) int {
 	for i := range items {
 		if items[i].ID == id {
@@ -351,6 +370,19 @@ func (e *Editor) removeUnusedKey(path string) {
 	_ = os.Remove(clean)
 }
 
+// ServiceSettings 是可在线维护的服务参数；除价格缓存外，保存后需重启服务生效。
+type ServiceSettings struct {
+	CaptionModelID          string `json:"caption_model_id"`
+	Concurrency             int    `json:"concurrency"`
+	TimeoutSeconds          int    `json:"timeout_seconds"`
+	MaxOutputTokens         int    `json:"max_output_tokens"`
+	CacheTTLDays            int    `json:"cache_ttl_days"`
+	CacheMaxTTLDays         int    `json:"cache_max_ttl_days"`
+	SharedCache             bool   `json:"shared_cache_enabled"`
+	PricingCatalogTTLHours  int    `json:"pricing_catalog_ttl_hours"`
+	PricingExchangeTTLHours int    `json:"pricing_exchange_ttl_hours"`
+}
+
 func (e *Editor) save(items []config.Model, providers []config.Provider, defaultID, captionID *string) error {
 	raw, err := os.ReadFile(e.path)
 	if err != nil {
@@ -382,6 +414,60 @@ func (e *Editor) save(items []config.Model, providers []config.Provider, default
 	if captionID != nil {
 		document["caption_model_id"], _ = json.Marshal(*captionID)
 	}
+	return e.writeDocument(document)
+}
+
+// UpdateServiceSettings 只改写服务参数与价格缓存期限，保留模型、提供商和密钥路径。
+func (e *Editor) UpdateServiceSettings(input ServiceSettings) error {
+	if input.Concurrency < 1 || input.Concurrency > 16 {
+		return invalid("同时处理查询必须在 1 到 16 之间")
+	}
+	if input.TimeoutSeconds < 5 || input.TimeoutSeconds > 300 {
+		return invalid("查询超时必须在 5 到 300 秒之间")
+	}
+	if input.MaxOutputTokens < 1 || input.MaxOutputTokens > 32768 {
+		return invalid("最大输出 token 必须在 1 到 32768 之间")
+	}
+	if input.CacheTTLDays < 1 || input.CacheTTLDays > input.CacheMaxTTLDays || input.CacheMaxTTLDays > 365 {
+		return invalid("默认缓存期限不能高于最长缓存期限，且最长不超过 365 天")
+	}
+	if input.PricingCatalogTTLHours < 1 || input.PricingCatalogTTLHours > 720 ||
+		input.PricingExchangeTTLHours < 1 || input.PricingExchangeTTLHours > 720 {
+		return invalid("价格缓存期限必须在 1 到 720 小时之间")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	raw, err := os.ReadFile(e.path)
+	if err != nil {
+		return errors.New("无法读取题库配置文件")
+	}
+	document := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return errors.New("题库配置文件格式无效")
+	}
+	current, err := config.Load(e.path)
+	if err != nil {
+		return invalid("配置不可用：" + err.Error())
+	}
+	limits := current.Limits
+	limits.Concurrency, limits.TimeoutSeconds, limits.MaxOutputTokens = input.Concurrency, input.TimeoutSeconds, input.MaxOutputTokens
+	cache := current.Cache
+	cache.TTLDays, cache.MaxTTLDays, cache.SharedEnabled = input.CacheTTLDays, input.CacheMaxTTLDays, input.SharedCache
+	pricing := current.PricingCache
+	pricing.CatalogTTLHours, pricing.ExchangeTTLHours = input.PricingCatalogTTLHours, input.PricingExchangeTTLHours
+	for key, value := range map[string]any{
+		"limits": limits, "cache": cache, "pricing_cache": pricing, "caption_model_id": input.CaptionModelID,
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return errors.New("无法编码服务设置")
+		}
+		document[key] = encoded
+	}
+	return e.writeDocument(document)
+}
+
+func (e *Editor) writeDocument(document map[string]json.RawMessage) error {
 	output, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return errors.New("无法编码题库配置")

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -45,9 +46,11 @@ type Store struct{ pool *pgxpool.Pool }
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
-// List 按公开排序返回全部条目。
+// List 按公开排序返回每个已绑定模型的唯一条目。
 func (s *Store) List(ctx context.Context) ([]Offering, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+offeringColumns+` FROM tiku.offerings ORDER BY sort_order, public_id`)
+	rows, err := s.pool.Query(ctx, `SELECT `+offeringColumns+` FROM tiku.offerings
+		WHERE deleted_at IS NULL AND EXISTS (SELECT 1 FROM tiku.offering_model_bindings AS binding WHERE binding.offering_id = tiku.offerings.id)
+		ORDER BY sort_order, public_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -64,14 +67,15 @@ func (s *Store) List(ctx context.Context) ([]Offering, error) {
 }
 
 func (s *Store) Get(ctx context.Context, publicID string) (*Offering, error) {
-	item, err := scanOffering(s.pool.QueryRow(ctx, `SELECT `+offeringColumns+` FROM tiku.offerings WHERE public_id = $1`, publicID))
+	item, err := scanOffering(s.pool.QueryRow(ctx, `SELECT `+offeringColumns+` FROM tiku.offerings
+		WHERE public_id = $1 AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM tiku.offering_model_bindings AS binding WHERE binding.offering_id = tiku.offerings.id)`, publicID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return item, err
 }
 
-// Create 在单个事务中写入条目与价格版本；同一时刻最多一个默认条目。
+// Create 在单个事务中写入唯一模型绑定、条目与价格版本。
 func (s *Store) Create(ctx context.Context, item *Offering, actor string) (*Offering, error) {
 	capabilities, err := json.Marshal(item.Capabilities)
 	if err != nil {
@@ -105,6 +109,15 @@ func (s *Store) Create(ctx context.Context, item *Offering, actor string) (*Offe
 	if err != nil {
 		if isDefaultConflict(err) {
 			return nil, ErrVersionConflict
+		}
+		if isModelOfferingConflict(err) {
+			return nil, ErrModelAlreadyPublished
+		}
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO tiku.offering_model_bindings(provider_ref, offering_id) VALUES($1,$2)`, created.ProviderRef, created.ID); err != nil {
+		if isModelOfferingConflict(err) {
+			return nil, ErrModelAlreadyPublished
 		}
 		return nil, err
 	}
@@ -141,7 +154,8 @@ func (s *Store) Update(ctx context.Context, item *Offering, version int64, actor
 	defer rollback(tx)
 	var currentVersion int64
 	var currentID string
-	err = tx.QueryRow(ctx, `SELECT id::text, version FROM tiku.offerings WHERE public_id = $1 FOR UPDATE`, item.PublicID).
+	err = tx.QueryRow(ctx, `SELECT id::text, version FROM tiku.offerings
+		WHERE public_id = $1 AND deleted_at IS NULL FOR UPDATE`, item.PublicID).
 		Scan(&currentID, &currentVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -157,6 +171,16 @@ func (s *Store) Update(ctx context.Context, item *Offering, version int64, actor
 			return nil, err
 		}
 	}
+	bindingUpdate, err := tx.Exec(ctx, `UPDATE tiku.offering_model_bindings SET provider_ref=$2,updated_at=now() WHERE offering_id=$1`, currentID, item.ProviderRef)
+	if err != nil {
+		if isModelOfferingConflict(err) {
+			return nil, ErrModelAlreadyPublished
+		}
+		return nil, err
+	}
+	if bindingUpdate.RowsAffected() != 1 {
+		return nil, ErrNotFound
+	}
 	updated, err := scanOffering(tx.QueryRow(ctx, `UPDATE tiku.offerings SET
 		display_name = $2, description = $3, provider_ref = $4, capabilities = $5, pricing = $6,
 		price_version = $7, cache_policy = $8, enabled = $9, is_default = $10, sort_order = $11,
@@ -168,6 +192,9 @@ func (s *Store) Update(ctx context.Context, item *Offering, version int64, actor
 	if err != nil {
 		if isDefaultConflict(err) {
 			return nil, ErrVersionConflict
+		}
+		if isModelOfferingConflict(err) {
+			return nil, ErrModelAlreadyPublished
 		}
 		return nil, err
 	}
@@ -191,7 +218,8 @@ func (s *Store) Retire(ctx context.Context, actor, publicID string, version int6
 	}
 	defer rollback(tx)
 	var currentVersion int64
-	err = tx.QueryRow(ctx, `SELECT version FROM tiku.offerings WHERE public_id = $1 FOR UPDATE`, publicID).Scan(&currentVersion)
+	err = tx.QueryRow(ctx, `SELECT version FROM tiku.offerings
+		WHERE public_id = $1 AND deleted_at IS NULL FOR UPDATE`, publicID).Scan(&currentVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -216,9 +244,60 @@ func (s *Store) Retire(ctx context.Context, actor, publicID string, version int6
 	return retired, nil
 }
 
+// Delete 从当前目录移除条目并释放模型绑定；价格版本与历史查询引用保持不变。
+func (s *Store) Delete(ctx context.Context, actor, publicID string, version int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	item, err := scanOffering(tx.QueryRow(ctx, `SELECT `+offeringColumns+` FROM tiku.offerings
+		WHERE public_id = $1 AND deleted_at IS NULL AND EXISTS (
+			SELECT 1 FROM tiku.offering_model_bindings AS binding WHERE binding.offering_id = tiku.offerings.id
+		) FOR UPDATE`, publicID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if item.Version != version {
+		return ErrVersionConflict
+	}
+	deleted, err := tx.Exec(ctx, `DELETE FROM tiku.offering_model_bindings WHERE offering_id = $1`, item.ID)
+	if err != nil {
+		return err
+	}
+	if deleted.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `UPDATE tiku.offerings SET enabled = false, is_default = false,
+		deleted_at = now(), version = version + 1, updated_at = now() WHERE id = $1`, item.ID); err != nil {
+		return err
+	}
+	item.Enabled = false
+	item.Default = false
+	item.Version++
+	if err := recordOfferingAudit(ctx, tx, actor, "offering.delete", item); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// Exists 包含已删除条目，用于读取仍需保留的历史价格版本。
+func (s *Store) Exists(ctx context.Context, publicID string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tiku.offerings WHERE public_id = $1)`, publicID).Scan(&exists)
+	return exists, err
+}
+
 func recordOfferingAudit(ctx context.Context, tx pgx.Tx, actor, action string, item *Offering) error {
-	detail, err := json.Marshal(map[string]any{"provider_ref": item.ProviderRef, "enabled": item.Enabled,
-		"is_default": item.Default, "price_version": item.PriceVersion})
+	detailValues := map[string]any{"provider_ref": item.ProviderRef, "enabled": item.Enabled,
+		"is_default": item.Default, "price_version": item.PriceVersion}
+	if action == "offering.delete" {
+		detailValues["deleted"] = true
+	}
+	detail, err := json.Marshal(detailValues)
 	if err != nil {
 		return err
 	}
@@ -253,6 +332,11 @@ func recordPriceVersion(ctx context.Context, tx pgx.Tx, offeringID string, prici
 }
 
 // isDefaultConflict 只识别默认条目唯一约束，避免把其他写入失败误判为并发冲突。
+func isModelOfferingConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.ConstraintName == "offering_model_bindings_pkey" || pgErr.ConstraintName == "offering_model_bindings_offering_id_key")
+}
+
 func isDefaultConflict(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "offerings_one_default_idx")
 }

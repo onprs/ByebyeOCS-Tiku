@@ -33,3 +33,26 @@ func TestReadSecretFileIsBounded(t *testing.T) {
 		t.Fatal("超长密钥应被拒绝")
 	}
 }
+
+func TestLocalAutoLoginRequiresLoopbackOrigin(t *testing.T) {
+	base := Config{
+		Listen: "127.0.0.1:8093", DatabaseDSNFile: "db", ServiceTokenFile: "token", UpstreamCAFile: "ca",
+		Limits: Limits{MaxRequestBytes: 1 << 20, MaxImages: 1, MaxImageBytes: 1 << 20, MaxImagePixels: 1 << 20,
+			MaxOutputTokens: 256, Concurrency: 1, TimeoutSeconds: 5, IdempotencyRetentionHours: 168},
+		Cache: Cache{TTLDays: 1, MaxTTLDays: 30},
+		Panel: Panel{Enabled: true, Origin: "http://127.0.0.1:5193", LocalAutoLogin: true,
+			Users: []PanelUser{{Username: "maintainer", Role: "maintainer", PasswordHashFile: "hash"}}},
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("回环入口应允许本地自动登录：%v", err)
+	}
+	public := base
+	public.Panel.Origin = "https://admin.example.com"
+	if err := public.Validate(); err == nil {
+		t.Fatal("公开入口不应允许本地自动登录")
+	}
+	public.Panel.LocalAutoLogin = false
+	if err := public.Validate(); err != nil {
+		t.Fatalf("公开入口关闭本地自动登录后应正常：%v", err)
+	}
+}

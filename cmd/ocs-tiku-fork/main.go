@@ -238,6 +238,11 @@ func serve(cfg *config.Config) error {
 		if err != nil {
 			return err
 		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			maintenance.WarmPricingReference(ctx)
+		}()
 		handler = panel.Mount(handler, maintenance)
 	}
 	server := &http.Server{

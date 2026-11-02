@@ -77,7 +77,7 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, current ses
 	jsonResponse(w, 200, map[string]any{"id": id, "audit_pending": !recorded})
 }
 
-// deleteModel 删除未被公开条目引用的上游模型。
+// deleteModel 删除上游模型；关联公开条目从当前目录移除，历史价格与查询结算事实保留。
 func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request, current session) {
 	if s.editor == nil {
 		fail(w, 503, "config_unavailable", "题库配置文件不可写，无法删除上游模型")
@@ -91,21 +91,26 @@ func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request, current ses
 		fail(w, 503, "service_unavailable", "暂时无法核对公开条目，请稍后重试")
 		return
 	}
-	for _, offering := range offerings {
-		if offering.ProviderRef == id {
-			fail(w, 409, "model_in_use", "仍有公开条目引用该模型，请先更换条目的关联模型")
-			return
-		}
-	}
 	if !s.beginConfigChange(w, r, current, "upstream_model.delete", id) {
 		return
+	}
+	removed := 0
+	for _, offering := range offerings {
+		if offering.ProviderRef != id {
+			continue
+		}
+		if err := s.catalog.Delete(r.Context(), current.Username, offering.PublicID, offering.Version); err != nil {
+			offeringFailure(w, err)
+			return
+		}
+		removed++
 	}
 	if _, err := s.editor.Delete(id); err != nil {
 		modelConfigFailure(w, err)
 		return
 	}
 	recorded := s.finishConfigChange(r, current, "upstream_model.delete", id)
-	jsonResponse(w, 200, map[string]any{"id": id, "deleted": true, "audit_pending": !recorded})
+	jsonResponse(w, 200, map[string]any{"id": id, "deleted": true, "removed_offerings": removed, "audit_pending": !recorded})
 }
 
 func modelConfigFailure(w http.ResponseWriter, err error) {

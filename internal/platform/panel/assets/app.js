@@ -25,11 +25,12 @@ const navigation = [
   ['requests', '查询记录', 'M6 3h9l4 4v14H6z M14 3v5h5 M9 12h7 M9 16h7'],
   ['cache', '精确缓存', 'M4 5c0-4 16-4 16 0s-16 4-16 0v14c0 4 16 4 16 0V5 M4 12c0 4 16 4 16 0'],
   ['audit', '操作记录', 'M9 3h6v4H9z M9 5H5v16h14V5h-4 M8 12h8 M8 16h5'],
-  ['settings', '设置', 'M12 8a4 4 0 1 0 0 8a4 4 0 0 0 0-8 M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2'],
+  ['settings', '设置', 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z'],
 ];
 const statusLabels = { answered: '已回答', cache_hit: '缓存命中', usage_incomplete: '用量不完整', pending: '处理中', completed: '已完成', failed: '失败', unknown: '结果待核对', active: '有效', expired: '已过期', invalidated: '已失效' };
 const errorLabels = { unsupported_protocol: '该协议不支持无用量连通测试', rate_limited: '上游请求受限', upstream_rate_limited: '上游请求受限', model_auth_failed: '模型服务认证失败', response_too_large: '模型响应超过大小上限', upstream_timeout: '上游响应超时', empty_answer: '模型返回空答案', model_disabled: '模型已停用', usage_incomplete: '用量不完整', request_cancelled: '请求已取消', model_unavailable: '模型暂不可用' };
-const actionLabels = { 'provider.create.request': '尝试新增提供商', 'provider.update.request': '尝试更新提供商', 'provider.delete.request': '尝试删除提供商', 'upstream_model.create.request': '尝试新增模型', 'upstream_model.update.request': '尝试更新模型', 'upstream_model.delete.request': '尝试删除模型', 'provider.create': '新增提供商', 'provider.update': '更新提供商', 'provider.delete': '删除提供商', 'upstream_model.create': '新增模型', 'upstream_model.update': '更新模型', 'upstream_model.delete': '删除模型', 'session.login': '登录', 'session.logout': '退出登录', 'model.state': '调整模型状态', 'model.test.request': '开始模型测试', 'model.test.result': '模型测试结束', 'offering.create': '发布公开条目', 'offering.update': '更新公开条目', 'offering.retire': '停用公开条目', 'offering.test.request': '开始公开条目测试', 'offering.test.result': '公开条目测试结束', 'cache.invalidate': '使缓存失效' };
+const pricingStatusLabels = { pricing_invalid_request: '无法匹配该模型', pricing_provider_unknown: '未收录该厂商', pricing_model_unknown: '未找到参考价格', pricing_incomplete: '暂无可用参考价', pricing_ambiguous: '参考价格不唯一', pricing_source_unavailable: '价格来源暂时不可用', pricing_exchange_unavailable: '汇率暂时不可用' };
+const actionLabels = { 'provider.create.request': '尝试新增提供商', 'provider.update.request': '尝试更新提供商', 'provider.delete.request': '尝试删除提供商', 'provider.models.request': '请求上游模型目录', 'provider.models.result': '获取上游模型目录', 'offering.publish_check.request': '检查公开模型连接', 'offering.publish_check.result': '公开模型连接检查结束', 'upstream_model.create.request': '尝试新增模型', 'upstream_model.update.request': '尝试更新模型', 'upstream_model.delete.request': '尝试删除模型', 'provider.create': '新增提供商', 'provider.update': '更新提供商', 'provider.delete': '删除提供商', 'provider.models': '获取上游模型目录', 'upstream_model.create': '新增模型', 'upstream_model.update': '更新模型', 'upstream_model.delete': '删除模型', 'session.login': '登录', 'session.local_login': '本地自动登录', 'session.logout': '退出登录', 'settings.update': '更新服务设置', 'settings.update.request': '尝试更新服务设置', 'pricing_cache.refresh': '刷新价格缓存', 'pricing_cache.refresh.request': '尝试刷新价格缓存', 'model.state': '调整模型状态', 'model.test.request': '开始模型测试', 'model.test.result': '模型测试结束', 'offering.create': '发布公开条目', 'offering.update': '更新公开条目', 'offering.retire': '下架公开条目', 'offering.delete': '删除公开条目', 'offering.test.request': '开始公开条目测试', 'offering.test.result': '公开条目测试结束', 'cache.invalidate': '使缓存失效' };
 const pageState = new Map();
 const formatNumber = value => value == null ? '—' : Number(value).toLocaleString('zh-CN');
 const formatTime = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -53,6 +54,128 @@ function icon(path) {
   shape.setAttribute('d', path);
   element.append(shape);
   return element;
+}
+function svgNode(tag, attrs = {}) {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, String(value));
+  return element;
+}
+function niceCountScale(maximum) {
+  if (!Number.isFinite(maximum) || maximum <= 0) return { max: 4, step: 1 };
+  const rough = maximum / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(rough));
+  const residual = rough / magnitude;
+  const step = (residual <= 1 ? 1 : residual <= 2 ? 2 : residual <= 5 ? 5 : 10) * magnitude;
+  return { max: Math.ceil(maximum / step) * step, step };
+}
+function linePath(points) {
+  return points.map((point, index) => `${index ? 'L' : 'M'}${point[0].toFixed(1)} ${point[1].toFixed(1)}`).join(' ');
+}
+function trendChart(daily) {
+  const values = Array.isArray(daily) ? daily : [];
+  const total = values.reduce((sum, day) => sum + Number(day.queries || 0), 0);
+  const card = node('section', 'chart-panel');
+  const heading = node('div', 'chart-heading');
+  heading.append(node('h2', '', '查询趋势'), node('p', '', '最近 14 天'));
+  card.append(heading);
+  if (!values.length || total === 0) {
+    card.append(node('div', 'chart-empty', '最近 14 天暂无查询'));
+    return card;
+  }
+  const width = 720, height = 250, left = 42, right = 16, top = 16, bottom = 30;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  const cacheTotal = values.reduce((sum, day) => sum + Number(day.cache_hits || 0), 0);
+  const { max, step } = niceCountScale(Math.max(...values.map(day => Number(day.queries || 0))));
+  const x = index => left + (values.length === 1 ? plotWidth / 2 : index * plotWidth / (values.length - 1));
+  const y = value => top + plotHeight - Math.min(Number(value || 0), max) / max * plotHeight;
+  const bottomY = top + plotHeight;
+  const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, class: 'trend-svg', role: 'img',
+    'aria-label': `最近 14 天共 ${total} 次查询，缓存命中 ${cacheTotal} 次` });
+  svg.append(svgNode('title'));
+  svg.firstChild.textContent = `最近 14 天查询趋势：共 ${total} 次查询，缓存命中 ${cacheTotal} 次`;
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4969ce';
+  const gradientID = 'trend-fill-' + crypto.randomUUID();
+  const defs = svgNode('defs');
+  const gradient = svgNode('linearGradient', { id: gradientID, x1: '0', y1: '0', x2: '0', y2: '1' });
+  gradient.append(svgNode('stop', { offset: '0%', 'stop-color': accent, 'stop-opacity': '0.26' }),
+    svgNode('stop', { offset: '100%', 'stop-color': accent, 'stop-opacity': '0' }));
+  defs.append(gradient); svg.append(defs);
+  for (let value = 0; value <= max; value += step) {
+    const lineY = y(value);
+    svg.append(svgNode('line', { x1: left, y1: lineY, x2: width - right, y2: lineY, class: 'chart-grid' }));
+    const label = svgNode('text', { x: left - 10, y: lineY + 4, class: 'chart-axis', 'text-anchor': 'end' });
+    label.textContent = formatNumber(value);
+    svg.append(label);
+  }
+  const queryPoints = values.map((day, index) => [x(index), y(day.queries)]);
+  const cachePoints = values.map((day, index) => [x(index), y(day.cache_hits)]);
+  const areaPath = `${linePath(queryPoints)} L${x(values.length - 1).toFixed(1)} ${bottomY} L${x(0).toFixed(1)} ${bottomY} Z`;
+  svg.append(svgNode('path', { d: areaPath, fill: `url(#${gradientID})` }));
+  svg.append(svgNode('path', { d: linePath(queryPoints), class: 'chart-line-primary' }));
+  svg.append(svgNode('path', { d: linePath(cachePoints), class: 'chart-line-cache' }));
+  const labelIndices = [...new Set(values.length <= 7 ? values.map((_, index) => index) : [0, Math.floor((values.length - 1) / 3), Math.floor((values.length - 1) * 2 / 3), values.length - 1])];
+  for (const index of labelIndices) {
+    const label = svgNode('text', { x: x(index), y: height - 8, class: 'chart-axis', 'text-anchor': index === 0 ? 'start' : index === values.length - 1 ? 'end' : 'middle' });
+    label.textContent = String(values[index].date || '').slice(5);
+    svg.append(label);
+  }
+  for (const [index, day] of values.entries()) {
+    const hit = svgNode('g');
+    const target = svgNode('circle', { cx: x(index), cy: y(day.queries), r: 9, class: 'chart-hit' });
+    const title = svgNode('title');
+    title.textContent = `${day.date}：${Number(day.queries || 0)} 次查询，缓存命中 ${Number(day.cache_hits || 0)} 次`;
+    target.append(title); hit.append(target); svg.append(hit);
+    svg.append(svgNode('circle', { cx: x(index), cy: y(day.cache_hits), r: 2.5, class: 'chart-dot-cache' }));
+  }
+  card.append(svg);
+  const legend = node('div', 'chart-legend');
+  const primary = node('span'); primary.append(node('i'), document.createTextNode('全部查询'));
+  const cache = node('span'); const cacheLine = node('i', 'cache'); cache.append(cacheLine, document.createTextNode('缓存命中'));
+  legend.append(primary, cache);
+  card.append(legend);
+  return card;
+}
+function modelDistribution(models) {
+  const values = Array.isArray(models) ? models : [];
+  const total = values.reduce((sum, model) => sum + Number(model.queries || 0), 0);
+  const card = node('section', 'chart-panel');
+  const heading = node('div', 'chart-heading');
+  heading.append(node('h2', '', '模型分布'), node('p', '', '累计'));
+  card.append(heading);
+  if (!values.length || total === 0) {
+    card.append(node('div', 'chart-empty', '尚无模型用量'));
+    return card;
+  }
+  const top = values.slice(0, 5);
+  const rest = values.slice(5);
+  if (rest.length) {
+    top.push({ model_id: 'other', display_name: '其他模型', queries: rest.reduce((sum, model) => sum + Number(model.queries || 0), 0),
+      cache_hits: rest.reduce((sum, model) => sum + Number(model.cache_hits || 0), 0) });
+  }
+  const list = node('div', 'distribution-list');
+  for (const model of top) {
+    const queries = Number(model.queries || 0), hits = Math.min(Number(model.cache_hits || 0), queries);
+    const row = node('div', 'distribution-row');
+    const label = node('div', 'distribution-label');
+    const name = node('b', '', model.display_name || model.model_id);
+    name.title = model.model_id || '';
+    label.append(name, node('span', '', formatNumber(queries) + ' · ' + Math.round(queries / total * 100) + '%'));
+    const bar = node('div', 'distribution-bar');
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', `${model.display_name || model.model_id}：${queries} 次查询，缓存命中 ${hits} 次`);
+    const cache = node('i', 'cache'); cache.style.width = `${hits / total * 100}%`;
+    const called = node('i', 'model'); called.style.width = `${(queries - hits) / total * 100}%`;
+    bar.append(cache, called);
+    row.append(label, bar);
+    list.append(row);
+  }
+  card.append(list);
+  const legend = node('div', 'chart-legend');
+  const cache = node('span'); cache.append(node('i', 'cache'), document.createTextNode('缓存命中'));
+  const called = node('span'); called.append(node('i', 'model'), document.createTextNode('模型调用'));
+  legend.append(cache, called);
+  card.append(legend);
+  return card;
 }
 function button(label, action, className = '') {
   const element = node('button', className, label);
@@ -98,7 +221,10 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     if (response.status === 401 && path !== '/login') { session = undefined; renderLogin(); }
-    throw new Error(data?.error?.message || '操作未完成，请稍后重试');
+    const error = new Error(data?.error?.message || '操作未完成，请稍后重试');
+    error.code = data?.error?.code;
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -111,6 +237,14 @@ function field(label, input) {
   title.htmlFor = control.id;
   wrapper.append(title, input);
   return wrapper;
+}
+function checkField(inputNode, labelText) {
+  const row = node('div', 'check-row');
+  if (!inputNode.id) inputNode.id = 'field-' + crypto.randomUUID();
+  const label = node('label', '', labelText);
+  label.htmlFor = inputNode.id;
+  row.append(inputNode, label);
+  return row;
 }
 function input(type, name, autocomplete) {
   const element = node('input');
@@ -178,7 +312,7 @@ function renderShell() {
   const top = node('header', 'topbar');
   const account = node('div', 'account');
   account.append(node('span', '', session.username), node('span', 'status', session.role === 'maintainer' ? '维护员' : '只读账号'));
-  account.append(button('退出登录', async element => {
+  if (!session.local_auto_login) account.append(button('退出登录', async element => {
     element.disabled = true;
     try { await api('/logout', { method: 'POST', body: '{}' }); session = undefined; renderLogin(); } catch (error) { notify(error.message, true); element.disabled = false; }
   }));
@@ -320,6 +454,9 @@ async function renderOverview(page) {
     stats.append(stat);
   }
   page.append(stats);
+  const charts = node('div', 'overview-charts');
+  charts.append(trendChart(summary.daily), modelDistribution(summary.by_model));
+  page.append(charts);
 
   const usage = node('section', 'overview-section');
   const usageHeader = node('div', 'card-header');
@@ -394,7 +531,7 @@ function modelTest(model, functional) {
   dialog.footer.append(submit);
 }
 const protocolLabels = { 'openai-chat': 'OpenAI 兼容', 'anthropic-messages': 'Anthropic', 'gemini-generate-content': 'Gemini', 'ollama-chat': 'Ollama' };
-const capabilityLabels = { text: '文本', vision: '图片', tool_call: '工具调用' };
+const capabilityLabels = { text: '文本', vision: '图片', tool_call: '工具调用', reasoning: '推理' };
 const microsToYuanInput = value => {
   if (value == null || value === '') return '';
   const padded = String(value).padStart(7, '0');
@@ -411,8 +548,8 @@ const parseYuanMicros = raw => {
 };
 const formatTokenPrice = value => value == null ? '未定价' : microsToYuanInput(value) + ' 元 / 百万 token';
 function offeringStatus(model, offering, orphan) {
-  if (offering && !offering.enabled) return { text: '已下架', tone: '' };
   if (orphan) return { text: '模型已移除', tone: ' bad' };
+  if (offering && !offering.enabled) return { text: '已下架', tone: '' };
   if (model.locked) return { text: '配置停用', tone: ' bad' };
   if (!model.enabled) return { text: '模型已停用', tone: ' warn' };
   if (!offering) return { text: '未发布', tone: ' warn' };
@@ -433,10 +570,13 @@ function offeringCard(model, offering, settings, orphan = false) {
   card.append(tags);
   if (offering) {
     const summary = node('div', 'model-pricing');
+    const fallbackCachePrice = offering.pricing ? '按输入价格' : '未定价';
     for (const [label, value] of [
       ['输入', formatTokenPrice(offering.pricing?.input_micros_per_million_tokens ?? null)],
       ['输出', formatTokenPrice(offering.pricing?.output_micros_per_million_tokens ?? null)],
-      ['缓存', offering.cache_policy.allow ? (offering.cache_policy.scope === 'shared' ? '共享缓存' : '用户隔离') + ' · ' + offering.cache_policy.ttl_days + ' 天' : '已关闭'],
+      ['缓存读取', offering.pricing?.cache_read_micros_per_million_tokens == null ? fallbackCachePrice : formatTokenPrice(offering.pricing.cache_read_micros_per_million_tokens)],
+      ['缓存创建', offering.pricing?.cache_write_micros_per_million_tokens == null ? fallbackCachePrice : formatTokenPrice(offering.pricing.cache_write_micros_per_million_tokens)],
+      ['缓存策略', offering.cache_policy.allow ? (offering.cache_policy.scope === 'shared' ? '共享缓存' : '用户隔离') + ' · ' + offering.cache_policy.ttl_days + ' 天' : '已关闭'],
     ]) {
       const item = node('span');
       item.append(node('span', 'muted', label + ' '), document.createTextNode(value));
@@ -446,12 +586,16 @@ function offeringCard(model, offering, settings, orphan = false) {
   } else {
     card.append(node('p', 'muted', '尚未发布公开条目；用户不能选择此模型。'));
   }
-  if (orphan) card.append(node('p', 'muted', '关联模型已移除'));
   const actions = node('div', 'actions model-actions');
   actions.append(button('详情', () => modelDetailsDialog(model, offering)));
   if (session.role === 'maintainer') {
     actions.append(button('编辑', () => offeringDialog(offering, model, settings)));
     if (offering.enabled) actions.append(button('下架', () => retireOfferingDialog(offering)));
+    const remove = button('', () => deleteOfferingDialog(offering), 'icon-button danger');
+    remove.setAttribute('aria-label', '删除公开条目');
+    remove.title = '删除公开条目';
+    remove.append(icon('M4 7h16 M10 11v6 M14 11v6 M5 7l1 14h12l1-14 M9 7V4h6v3'));
+    actions.append(remove);
   }
   card.append(actions);
   return card;
@@ -467,6 +611,18 @@ function retireOfferingDialog(offering) {
     } catch (failure) { error.textContent = failure.message; }
   }, 'danger'));
 }
+function deleteOfferingDialog(offering) {
+  const dialog = openDialog('删除公开条目');
+  const error = node('p', 'form-error'); error.setAttribute('role', 'alert');
+  dialog.content.append(node('p', '', `确定删除「${offering.display_name}」？它将立即从用户公开目录移除，并释放上游模型绑定。已记录价格版本和既有查询的冻结价格及账单保留。`), error);
+  dialog.footer.append(button('取消', () => dialog.close()), button('删除公开条目', async element => {
+    element.disabled = true;
+    try {
+      await api('/offerings/' + encodeURIComponent(offering.public_id), { method: 'DELETE', body: JSON.stringify({ version: offering.version }) });
+      dialog.close(); notify('公开条目已删除，历史价格与账单记录保留'); loadPage();
+    } catch (failure) { error.textContent = failure.message; element.disabled = false; }
+  }, 'danger'));
+}
 function modelDetailsDialog(model, offering) {
   const dialog = openDialog('模型详情', true);
   dialog.content.append(detailGrid([
@@ -474,7 +630,6 @@ function modelDetailsDialog(model, offering) {
     ['模型标识', model.id],
     ['接入协议', protocolLabels[model.protocol] || model.protocol || '配置缺失'],
     ['公开编号', offering?.public_id || '未发布'],
-    ['价格版本', offering?.pricing?.version || '未定价'],
     ['输入价格', formatTokenPrice(offering?.pricing?.input_micros_per_million_tokens)],
     ['输出价格', formatTokenPrice(offering?.pricing?.output_micros_per_million_tokens)],
     ['最近测试', model.last_test ? formatTime(model.last_test.created_at) : '尚未测试'],
@@ -485,7 +640,6 @@ function providerDialog(provider) {
   const isNew = !provider;
   const dialog = openDialog(isNew ? '新增提供商' : '编辑提供商', true);
   const form = node('form');
-  const id = input('text', 'id'); id.value = provider?.id ?? ''; id.disabled = !isNew;
   const name = input('text', 'name'); name.value = provider?.name ?? '';
   const vendor = input('text', 'vendor'); vendor.required = false; vendor.value = provider?.vendor ?? '';
   const protocol = select('接入协议', Object.entries(protocolLabels), provider?.protocol ?? 'openai-chat', () => {});
@@ -493,9 +647,25 @@ function providerDialog(provider) {
   const key = input('password', 'api_key', 'new-password'); key.required = false;
   key.placeholder = isNew ? '请输入密钥' : '地址和协议不变时留空保留';
   const error = node('p', 'form-error'); error.setAttribute('role', 'alert');
+  const connectionStatus = node('p', 'muted'); connectionStatus.setAttribute('role', 'status');
+  const test = button('测试连接', async element => {
+    error.textContent = '';
+    connectionStatus.textContent = '正在检查模型目录…';
+    element.disabled = true;
+    try {
+      const result = await api('/providers/discovery', { method: 'POST', body: JSON.stringify({
+        provider_id: isNew ? '' : provider.id, protocol: protocol.value, vendor: vendor.value.trim(),
+        base_url: address.value.trim(), api_key: key.value.trim(),
+      }) });
+      connectionStatus.textContent = `连接成功，找到 ${formatNumber(result.items.length)} 个可用模型`;
+    } catch (failure) {
+      connectionStatus.textContent = '';
+      error.textContent = failure.message;
+    } finally { element.disabled = false; }
+  });
   const submit = node('button', 'primary', isNew ? '添加提供商' : '保存提供商'); submit.type = 'submit';
-  form.append(formSection('提供商', field('提供商标识', id), field('名称', name), field('厂商标识（可选）', vendor)),
-    formSection('连接', field('接入协议', protocol), field('接口地址', address), field('API 密钥', key)), error);
+  form.append(formSection('提供商', field('名称', name), field('厂商标识（可选）', vendor)),
+    formSection('连接', field('接入协议', protocol), field('接口地址', address), field('API 密钥', key), test, connectionStatus), error);
   formActions(dialog, form, submit);
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -504,12 +674,76 @@ function providerDialog(provider) {
     submit.disabled = true;
     try {
       const payload = { name: name.value.trim(), vendor: vendor.value.trim(), protocol: protocol.value, base_url: address.value.trim(), api_key: key.value.trim() };
-      if (isNew) payload.id = id.value.trim();
       const result = await api(isNew ? '/providers' : '/providers/' + encodeURIComponent(provider.id), { method: isNew ? 'POST' : 'PATCH', body: JSON.stringify(payload) });
-      dialog.close(); notifyConfigResult(result, isNew ? '提供商已添加' : '提供商已更新'); loadPage();
+      const savedProvider = { id: result.id, name: payload.name };
+      dialog.close();
+      notifyConfigResult(result, isNew ? '提供商已添加' : '提供商已更新');
+      await loadPage();
+      await providerDiscoveryDialog(savedProvider);
     } catch (failure) { error.textContent = failure.message; submit.disabled = false; }
   });
   dialog.content.append(form);
+}
+async function providerDiscoveryDialog(provider, onSelect) {
+  const dialog = openDialog('上游模型', true);
+  dialog.classList.add('discovery-drawer');
+  const status = node('p', 'muted', '正在读取模型目录…');
+  const search = input('search', 'model_search'); search.required = false; search.placeholder = '搜索模型名称或标识';
+  const list = node('div', 'discovery-list');
+  const retry = button('重试', () => load(), 'primary'); retry.hidden = true;
+  dialog.content.append(status, field('搜索', search), list);
+  dialog.footer.append(retry);
+  let items = [];
+  const render = () => {
+    list.replaceChildren();
+    const term = search.value.trim().toLocaleLowerCase();
+    const matches = items.filter(item => !term || (item.id + ' ' + item.display_name + ' ' + (item.owned_by || '')).toLocaleLowerCase().includes(term));
+    const visible = matches.slice(0, 200);
+    for (const item of visible) {
+      const row = node('div', 'discovery-item');
+      const detail = node('div', 'discovery-item-detail');
+      detail.append(node('strong', '', item.display_name || item.id), node('span', 'mono muted', item.id));
+      const metadata = node('div', 'discovery-item-meta');
+      for (const capability of item.capabilities || []) metadata.append(node('span', 'status', capabilityLabels[capability] || capability));
+      if (item.context) metadata.append(node('span', 'status muted', `上下文 ${formatNumber(item.context)}`));
+      if (metadata.childElementCount) detail.append(metadata);
+      const configured = !!item.configured_model_id;
+      const choose = button(configured ? '已添加' : '使用模型', () => {
+        if (configured) return;
+        if (onSelect) {
+          onSelect(item);
+          dialog.close();
+        } else {
+          dialog.close();
+          upstreamModelDialog(null, provider, item);
+        }
+      }, configured ? '' : 'primary');
+      choose.disabled = configured;
+      if (configured) choose.title = `已添加为 ${item.configured_model_id}`;
+      row.append(detail, choose);
+      list.append(row);
+    }
+    if (!matches.length) list.append(node('p', 'muted', '没有符合条件的模型'));
+    if (matches.length > visible.length) status.textContent = `找到 ${formatNumber(matches.length)} 个模型，当前显示前 ${visible.length} 个`;
+  };
+  search.addEventListener('input', render);
+  async function load() {
+    retry.hidden = true;
+    status.className = 'muted';
+    status.textContent = '正在读取模型目录…';
+    list.replaceChildren();
+    try {
+      const result = await api('/providers/' + encodeURIComponent(provider.id) + '/models', { method: 'POST', body: '{}' });
+      items = result.items || [];
+      status.textContent = `找到 ${formatNumber(items.length)} 个模型`;
+      render();
+    } catch (failure) {
+      status.className = 'form-error';
+      status.textContent = failure.message;
+      retry.hidden = false;
+    }
+  }
+  await load();
 }
 function deleteProviderDialog(provider) {
   const dialog = openDialog('删除提供商');
@@ -532,7 +766,7 @@ function providerCard(provider) {
   card.append(title, meta, node('div', 'mono muted provider-address', provider.base_url));
   if (session.role === 'maintainer') {
     const actions = node('div', 'actions model-actions');
-    actions.append(button('编辑提供商', () => providerDialog(provider)), button('删除', () => deleteProviderDialog(provider), 'danger'));
+    actions.append(button('获取模型', () => providerDiscoveryDialog(provider)), button('编辑提供商', () => providerDialog(provider)), button('删除', () => deleteProviderDialog(provider), 'danger'));
     card.append(actions);
   }
   return card;
@@ -543,15 +777,18 @@ function upstreamCard(model, offerings, providers, settings) {
   const state = model.locked ? { text: '配置停用', tone: ' bad' } : model.enabled ? { text: '已启用', tone: ' good' } : { text: '已停用', tone: ' warn' };
   title.append(node('h3', '', model.display_name), node('span', 'status' + state.tone, state.text));
   const provider = providers.find(item => item.id === model.provider_id);
-  card.append(title, node('div', 'mono muted', model.id + ' · ' + (provider?.name || '独立连接')));
+  card.append(title, node('div', 'mono muted provider-name', provider?.name || '独立连接'));
   const meta = node('div', 'model-meta');
   meta.append(node('span', 'status', protocolLabels[model.protocol] || model.protocol));
   for (const capability of model.capabilities) meta.append(node('span', 'status', capabilityLabels[capability] || capability));
-  card.append(meta, node('div', 'model-pricing muted', `${offerings} 个公开条目 · ${model.upstream_model}`));
+  const publicEntries = Array.isArray(offerings) ? offerings : [];
+  card.append(meta, node('div', 'model-pricing muted', `${publicEntries.length} 个公开条目 · ${model.upstream_model}`));
   if (session.role === 'maintainer') {
     const actions = node('div', 'actions model-actions');
-    actions.append(button('发布', () => offeringDialog(null, model, settings)), button('编辑配置', () => upstreamModelDialog(model)));
-    const menu = node('details', 'row-menu'); menu.append(node('summary', '', '更多操作'));
+    const currentOffering = publicEntries.find(item => item.enabled) || publicEntries[0];
+    actions.append(button(publicEntries.length ? '编辑公开条目' : '发布', () => offeringDialog(currentOffering || null, model, settings)), button('编辑配置', () => upstreamModelDialog(model)));
+    const menu = node('details', 'row-menu');
+    menu.append(node('summary', '', '更多操作'));
     const options = node('div');
     options.append(button('模型详情', () => modelDetailsDialog(model, null)), button('连通测试', () => modelTest(model, false)), button('功能测试', () => modelTest(model, true)));
     const toggle = button(model.enabled ? '停用' : '启用', async () => {
@@ -559,7 +796,7 @@ function upstreamCard(model, offerings, providers, settings) {
       notify('模型状态已更新'); loadPage();
     });
     toggle.disabled = model.locked;
-    options.append(toggle, button('删除模型', () => deleteModelDialog(model), 'danger'));
+    options.append(toggle, button('删除模型', () => deleteModelDialog(model, publicEntries.length, publicEntries.filter(item => item.enabled).length), 'danger'));
     menu.append(options); actions.append(menu); card.append(actions);
   } else card.append(button('模型详情', () => modelDetailsDialog(model, null)));
   return card;
@@ -592,8 +829,12 @@ async function renderOfferings(page) {
   if (modelTab === 'providers') for (const provider of providers) grid.append(providerCard(provider));
   if (modelTab === 'models') {
     const grouped = new Map();
-    for (const item of offerings) grouped.set(item.provider_ref, (grouped.get(item.provider_ref) || 0) + 1);
-    for (const model of models) grid.append(upstreamCard(model, grouped.get(model.id) || 0, providers, offeringData));
+    for (const item of offerings) {
+      const entries = grouped.get(item.provider_ref) || [];
+      entries.push(item);
+      grouped.set(item.provider_ref, entries);
+    }
+    for (const model of models) grid.append(upstreamCard(model, grouped.get(model.id) || [], providers, offeringData));
   }
   if (modelTab === 'public') for (const offering of offerings) {
     const model = models.find(item => item.id === offering.provider_ref);
@@ -603,7 +844,13 @@ async function renderOfferings(page) {
   if (grid.childElementCount) page.append(grid);
   else page.append(node('div', 'empty empty-surface', modelTab === 'providers' ? '尚未配置提供商' : modelTab === 'models' ? '尚未配置模型' : '尚未发布公开条目'));
 }
-async function upstreamModelDialog(model) {
+function discoveredModelIdentifier(providerID, upstreamID) {
+  const normalize = value => String(value).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[^a-z0-9]+/, '').replace(/[-_]+$/g, '');
+  const provider = normalize(providerID).slice(0, 24);
+  const model = normalize(upstreamID).slice(0, 39);
+  return [provider, model].filter(Boolean).join('-').slice(0, 64) || 'upstream-model';
+}
+async function upstreamModelDialog(model, providerHint, discoveredHint) {
   const isNew = !model;
   const providers = (await api('/providers')).items;
   if (isNew && !providers.length) { providerDialog(null); return; }
@@ -611,12 +858,13 @@ async function upstreamModelDialog(model) {
   const form = node('form');
   const id = input('text', 'id');
   id.required = isNew;
-  id.value = model?.id ?? '';
+  id.value = model?.id ?? (discoveredHint ? discoveredModelIdentifier(providerHint?.id ?? '', discoveredHint.id) : '');
   id.disabled = !isNew;
   const displayName = input('text', 'display_name');
-  displayName.value = model?.display_name ?? '';
+  displayName.value = discoveredHint?.display_name ?? model?.display_name ?? '';
+  const discoveredCapabilities = discoveredHint?.capabilities || [];
   const providerChoices = [['', isNew ? '选择提供商' : '原有独立连接'], ...providers.map(item => [item.id, item.name])];
-  const provider = select('提供商', providerChoices, model?.provider_id ?? '', () => updateConnection());
+  const provider = select('提供商', providerChoices, model?.provider_id ?? providerHint?.id ?? '', () => updateConnection());
   const protocol = select('接入协议', [['openai-chat', 'OpenAI 兼容'], ['anthropic-messages', 'Anthropic'], ['gemini-generate-content', 'Gemini'], ['ollama-chat', 'Ollama']], model?.protocol ?? 'openai-chat', () => { });
   const vendor = input('text', 'vendor');
   vendor.required = false;
@@ -625,23 +873,44 @@ async function upstreamModelDialog(model) {
   baseURL.value = model?.base_url ?? '';
   baseURL.placeholder = 'https://models.example.com/v1';
   const upstreamModel = input('text', 'upstream_model');
-  upstreamModel.value = model?.upstream_model ?? '';
+  upstreamModel.value = discoveredHint?.id ?? model?.upstream_model ?? '';
+  const chooseUpstream = button('选择模型', () => {
+    const selectedProvider = providers.find(item => item.id === provider.value);
+    if (!selectedProvider) {
+      error.textContent = '请先选择提供商';
+      return;
+    }
+    providerDiscoveryDialog(selectedProvider, item => {
+      upstreamModel.value = item.id;
+      if (!id.value.trim()) id.value = discoveredModelIdentifier(selectedProvider.id, item.id);
+      displayName.value = item.display_name || item.id;
+      if (item.metadata_matched) {
+        vision.checked = item.capabilities?.includes('vision') ?? false;
+        toolCall.checked = item.capabilities?.includes('tool_call') ?? false;
+        reasoning.checked = item.capabilities?.includes('reasoning') ?? false;
+        if (item.context > 0) context.value = String(item.context);
+        if (item.max_output_tokens > 0) maxOutput.value = String(item.max_output_tokens);
+      }
+    });
+  });
+  const upstreamPicker = node('div', 'model-picker');
+  upstreamPicker.append(upstreamModel, chooseUpstream);
   const apiKey = input('password', 'api_key', 'new-password');
   apiKey.required = false;
   apiKey.placeholder = isNew ? '非 Ollama 模型必填' : '留空保留原密钥';
   const vision = input('checkbox', 'vision');
   vision.required = false;
-  vision.checked = model?.vision ?? false;
+  vision.checked = discoveredHint?.metadata_matched ? discoveredCapabilities.includes('vision') : (model?.vision ?? false);
   const toolCall = input('checkbox', 'tool_call');
   toolCall.required = false;
-  toolCall.checked = model?.tool_call ?? false;
+  toolCall.checked = discoveredHint?.metadata_matched ? discoveredCapabilities.includes('tool_call') : (model?.tool_call ?? false);
   const reasoning = input('checkbox', 'reasoning');
   reasoning.required = false;
-  reasoning.checked = model?.reasoning ?? false;
+  reasoning.checked = discoveredHint?.metadata_matched ? discoveredCapabilities.includes('reasoning') : (model?.reasoning ?? false);
   const context = input('number', 'context');
   context.required = false;
   context.min = '0';
-  context.value = String(model?.context ?? 128000);
+  context.value = String(discoveredHint?.metadata_matched && discoveredHint.context > 0 ? discoveredHint.context : (model?.context ?? 128000));
   const maxOutput = input('number', 'max_output_tokens');
   maxOutput.required = false;
   maxOutput.min = '0';
@@ -666,14 +935,16 @@ async function upstreamModelDialog(model) {
   submit.type = 'submit';
   const connection = formSection('独立连接', field('接入协议', protocol), field('接口地址', baseURL),
     field('厂商标识（可选）', vendor), field('API 密钥', apiKey));
+  const upstreamModelPicker = upstreamPicker;
   function updateConnection() {
     connection.hidden = !!provider.value || isNew;
     baseURL.required = !connection.hidden;
+    chooseUpstream.disabled = !provider.value;
   }
   updateConnection();
   form.append(
     formSection('基本信息',
-      field('模型标识', id), field('显示名称', displayName), field('提供商', provider), field('上游模型名', upstreamModel)),
+      field('模型标识', id), field('显示名称', displayName), field('提供商', provider), field('上游模型名', upstreamModelPicker)),
     connection,
     formSection('模型能力',
       makeCheck(vision, '支持图片输入'), makeCheck(toolCall, '支持工具调用'),
@@ -726,17 +997,22 @@ async function upstreamModelDialog(model) {
   dialog.content.append(form);
 }
 
-function deleteModelDialog(model) {
+function deleteModelDialog(model, offeringCount = 0, enabledOfferingCount = 0) {
   const dialog = openDialog('删除上游模型');
   const error = node('p', 'form-error');
   error.setAttribute('role', 'alert');
-  dialog.content.append(node('p', '', '删除 ' + model.display_name + '（' + model.id + '）后，该模型不能再用于作答。仍有公开条目引用时会被拒绝。'), error);
+  let impact = '该模型当前没有关联的公开条目。';
+  if (offeringCount) {
+    impact = `关联 ${offeringCount} 个公开条目（${enabledOfferingCount} 个对用户可见）。确认后全部从当前目录移除；历史价格版本及既有查询的冻结价格和账单保留。`;
+  }
+  dialog.content.append(node('p', '', `删除 ${model.display_name}（${model.id}）后，该模型不能再用于作答。${impact}`), error);
   const submit = button('删除模型', async element => {
     element.disabled = true;
     try {
       const result = await api('/upstream-models/' + encodeURIComponent(model.id), { method: 'DELETE' });
       dialog.close();
-      notifyConfigResult(result, '上游模型已删除');
+      const removed = result.removed_offerings || 0;
+      notifyConfigResult(result, removed ? `上游模型已删除，${removed} 个公开条目已移除` : '上游模型已删除');
       loadPage();
     } catch (failure) {
       error.textContent = failure.message;
@@ -751,9 +1027,19 @@ async function offeringDialog(offering, model, settings) {
   const selected = availableModels.some(item => item.id === model.id) ? model.id : '';
   const dialog = openDialog(offering ? '编辑公开模型' : '发布公开模型', true);
   const form = node('form');
+  let pricingReference = offering?.pricing?.reference ?? null;
+  let pricingRequest = 0;
+  let pricingEdited = false;
   const modelSelect = select('关联模型', [['', '选择模型'], ...availableModels.map(item => [item.id, item.display_name + ' · ' + item.id])], selected, value => {
     model = availableModels.find(item => item.id === value) || null;
     updateVision();
+    pricingRequest++;
+    pricingReference = null;
+    pricingEdited = false;
+    fetchPricing.disabled = false;
+    for (const priceInput of [inputPrice, outputPrice, cacheReadPrice, cacheWritePrice]) priceInput.value = '';
+    if (model) fetchPricingReference(fetchPricing);
+    else setPricingStatus('idle', '');
   });
   model = availableModels.find(item => item.id === selected) || null;
   const name = input('text', 'display_name');
@@ -771,11 +1057,84 @@ async function offeringDialog(offering, model, settings) {
   outputPrice.required = false;
   outputPrice.inputMode = 'decimal';
   outputPrice.value = microsToYuanInput(offering?.pricing?.output_micros_per_million_tokens ?? '');
-  const priceVersion = input('text', 'price_version');
-  priceVersion.required = false;
-  priceVersion.maxLength = 64;
-  priceVersion.value = offering?.pricing?.version ?? '';
-  priceVersion.placeholder = (model?.id || 'model') + '-v1';
+  const cacheReadPrice = input('text', 'cache_read_price');
+  cacheReadPrice.required = false;
+  cacheReadPrice.inputMode = 'decimal';
+  cacheReadPrice.placeholder = '留空按输入价';
+  cacheReadPrice.value = microsToYuanInput(offering?.pricing?.cache_read_micros_per_million_tokens ?? '');
+  const cacheWritePrice = input('text', 'cache_write_price');
+  cacheWritePrice.required = false;
+  cacheWritePrice.inputMode = 'decimal';
+  cacheWritePrice.placeholder = '留空按输入价';
+  cacheWritePrice.value = microsToYuanInput(offering?.pricing?.cache_write_micros_per_million_tokens ?? '');
+  const pricingReferenceStatus = node('div', 'price-reference');
+  pricingReferenceStatus.hidden = true;
+  pricingReferenceStatus.setAttribute('role', 'status');
+  pricingReferenceStatus.setAttribute('aria-live', 'polite');
+  function setPricingStatus(state, text, detail = '') {
+    pricingReferenceStatus.dataset.state = state;
+    pricingReferenceStatus.title = detail;
+    pricingReferenceStatus.hidden = !text;
+    pricingReferenceStatus.replaceChildren();
+    if (state === 'loading') pricingReferenceStatus.append(node('span', 'reference-spinner'));
+    if (state === 'ok') pricingReferenceStatus.append(icon('M5 12.5l4.2 4.2L19 6.8'));
+    if (state === 'warn') pricingReferenceStatus.append(icon('M12 7v6 M12 16.8v.4 M12 3.4l8.6 16.2H3.4z'));
+    if (text) pricingReferenceStatus.append(node('span', '', text));
+  }
+  function flashPrices() {
+    const fields = [inputPrice, outputPrice, cacheReadPrice, cacheWritePrice];
+    for (const target of fields) {
+      target.classList.remove('price-updated');
+      void target.offsetWidth;
+      target.classList.add('price-updated');
+    }
+    setTimeout(() => fields.forEach(target => target.classList.remove('price-updated')), 900);
+  }
+  async function fetchPricingReference(element, overwriteManual = false) {
+    const selectedModel = model;
+    const canMatch = selectedModel?.upstream_model && (selectedModel.vendor || selectedModel.provider_id || selectedModel.upstream_model.includes('/'));
+    if (!canMatch) {
+      element.disabled = false;
+      setPricingStatus('warn', '该模型缺少厂商标识');
+      return;
+    }
+    const request = ++pricingRequest;
+    element.disabled = true;
+    setPricingStatus('loading', '正在获取参考价格');
+    try {
+      const query = new URLSearchParams({ model_id: selectedModel.upstream_model });
+      if (selectedModel.provider_id) query.set('provider_id', selectedModel.provider_id);
+      if (selectedModel.vendor) query.set('vendor', selectedModel.vendor);
+      const reference = await api('/model-pricing?' + query.toString());
+      if (request !== pricingRequest || model?.id !== selectedModel.id) return;
+      if (pricingEdited && !overwriteManual) {
+        setPricingStatus('idle', '已保留手动填写的价格');
+        return;
+      }
+      inputPrice.value = microsToYuanInput(reference.rates.input_micros_per_million_tokens);
+      outputPrice.value = microsToYuanInput(reference.rates.output_micros_per_million_tokens);
+      cacheReadPrice.value = microsToYuanInput(reference.rates.cache_read_micros_per_million_tokens ?? '');
+      cacheWritePrice.value = microsToYuanInput(reference.rates.cache_write_micros_per_million_tokens ?? '');
+      flashPrices();
+      pricingEdited = false;
+      pricingReference = { source: reference.source, source_url: reference.source_url,
+        exchange_source: reference.exchange_source, exchange_url: reference.exchange_url,
+        exchange_date: reference.exchange_date, exchange_rate: reference.exchange_rate };
+      const detail = [reference.provider_id && reference.model_id ? reference.provider_id + '/' + reference.model_id : '', reference.model_name,
+        reference.catalog_fetched_at ? '目录缓存于 ' + formatTime(reference.catalog_fetched_at) : ''].filter(Boolean).join(' · ');
+      setPricingStatus(reference.stale ? 'warn' : 'ok', `${reference.source} · ${reference.exchange_date} · 1 USD = ${reference.exchange_rate} CNY` + (reference.stale ? ' · 使用缓存' : ''), detail);
+    } catch (failure) {
+      if (request === pricingRequest) setPricingStatus('warn', pricingStatusLabels[failure.code] || '暂未获取参考价格');
+    } finally {
+      if (request === pricingRequest) element.disabled = false;
+    }
+  }
+  const fetchPricing = button('自动获取并填入参考价', element => fetchPricingReference(element, true));
+  const pricingReferenceRow = node('div', 'price-reference-row');
+  pricingReferenceRow.append(fetchPricing, pricingReferenceStatus);
+  for (const priceInput of [inputPrice, outputPrice, cacheReadPrice, cacheWritePrice]) {
+    priceInput.addEventListener('input', () => { pricingEdited = true; });
+  }
   const rounding = select('价格取整方式', [['ceil', '向上取整'], ['floor', '向下取整']], offering?.pricing?.rounding ?? 'ceil', () => { });
   const allowCache = input('checkbox', 'allow_cache');
   allowCache.required = false;
@@ -791,10 +1150,13 @@ async function offeringDialog(offering, model, settings) {
   ttl.value = String(offering?.cache_policy.ttl_days ?? Math.min(7, settings.cache_max_ttl_days));
   const enabled = input('checkbox', 'enabled');
   enabled.required = false;
-  enabled.checked = offering?.enabled ?? false;
+  enabled.checked = offering?.enabled ?? true;
   const isDefault = input('checkbox', 'is_default');
   isDefault.required = false;
   isDefault.checked = offering?.is_default ?? false;
+  if (pricingReference?.source) {
+    setPricingStatus('ok', `${pricingReference.source} · ${pricingReference.exchange_date} · 1 USD = ${pricingReference.exchange_rate} CNY`);
+  }
   const sortOrder = input('number', 'sort_order');
   sortOrder.required = false;
   sortOrder.value = String(offering?.sort_order ?? 0);
@@ -816,19 +1178,23 @@ async function offeringDialog(offering, model, settings) {
   updateVision();
   const error = node('p', 'form-error');
   error.setAttribute('role', 'alert');
+  const publishStatus = node('p', 'muted');
+  publishStatus.setAttribute('role', 'status');
   const submit = node('button', 'primary', offering ? '保存' : '发布');
   submit.type = 'submit';
   form.append(
     formSection('公开信息', field('关联模型', modelSelect), field('公开名称', name), field('说明', description), makeCheck(vision, '支持图片题')),
     formSection('Token 价格', field('输入价格（元 / 百万 token）', inputPrice),
-      field('输出价格（元 / 百万 token）', outputPrice), field('价格版本', priceVersion),
-      field('价格取整方式', rounding),
-      node('p', 'field-hint', '输入与输出价格都留空表示未定价。价格调整需填写新的价格版本。')),
+      field('输出价格（元 / 百万 token）', outputPrice),
+      field('缓存读取价格（元 / 百万 token）', cacheReadPrice),
+      field('缓存创建价格（元 / 百万 token）', cacheWritePrice),
+      pricingReferenceRow, field('价格取整方式', rounding),
+      node('p', 'field-hint', '缓存价格留空时按输入价格计费。四项都留空表示未定价；费率调整会自动记录新的价格快照。')),
     formSection('精确缓存', makeCheck(allowCache, '启用精确缓存'),
       field('缓存范围', scope), field('缓存期限（天）', ttl)),
     formSection('发布设置', makeCheck(enabled, '对用户可见'),
       makeCheck(isDefault, '设为默认模型'), field('排序值', sortOrder)),
-    error,
+    publishStatus, error,
   );
   formActions(dialog, form, submit);
   enabled.addEventListener('change', () => { if (!enabled.checked) isDefault.checked = false; });
@@ -840,14 +1206,29 @@ async function offeringDialog(offering, model, settings) {
     try {
       const inputRaw = inputPrice.value.trim();
       const outputRaw = outputPrice.value.trim();
-      if (inputRaw || outputRaw) {
-        if (!inputRaw || !outputRaw) throw new Error('请同时填写输入与输出价格，或都留空表示未定价');
-        const version = priceVersion.value.trim();
-        if (!version) throw new Error('请填写价格版本');
+      const cacheReadRaw = cacheReadPrice.value.trim();
+      const cacheWriteRaw = cacheWritePrice.value.trim();
+      if (inputRaw || outputRaw || cacheReadRaw || cacheWriteRaw) {
+        if (!inputRaw || !outputRaw) throw new Error('请填写输入与输出价格；缓存价格可留空');
+        const inputAmount = parseYuanMicros(inputRaw);
+        const outputAmount = parseYuanMicros(outputRaw);
+        const cacheReadAmount = parseYuanMicros(cacheReadRaw);
+        const cacheWriteAmount = parseYuanMicros(cacheWriteRaw);
+        const sameReference = ['source', 'source_url', 'exchange_source', 'exchange_url', 'exchange_date', 'exchange_rate']
+          .every(key => String(pricingReference?.[key] ?? '') === String(offering?.pricing?.reference?.[key] ?? ''));
+        const samePrice = offering?.pricing && sameReference && String(offering.pricing.input_micros_per_million_tokens) === inputAmount &&
+          String(offering.pricing.output_micros_per_million_tokens) === outputAmount &&
+          String(offering.pricing.cache_read_micros_per_million_tokens ?? '') === String(cacheReadAmount ?? '') &&
+          String(offering.pricing.cache_write_micros_per_million_tokens ?? '') === String(cacheWriteAmount ?? '') &&
+          offering.pricing.micros_per_minor === '10000' && offering.pricing.rounding === rounding.value &&
+          offering.pricing.rule === 'tokens_x_micros_per_million_v1';
         pricing = {
-          version,
-          input_micros_per_million_tokens: parseYuanMicros(inputRaw),
-          output_micros_per_million_tokens: parseYuanMicros(outputRaw),
+          version: samePrice ? offering.pricing.version : 'pv-' + crypto.randomUUID().replaceAll('-', ''),
+          input_micros_per_million_tokens: inputAmount,
+          output_micros_per_million_tokens: outputAmount,
+          ...(cacheReadAmount === null ? {} : { cache_read_micros_per_million_tokens: cacheReadAmount }),
+          ...(cacheWriteAmount === null ? {} : { cache_write_micros_per_million_tokens: cacheWriteAmount }),
+          reference: samePrice ? offering.pricing.reference : pricingReference,
           micros_per_minor: '10000',
           rounding: rounding.value,
           rule: 'tokens_x_micros_per_million_v1',
@@ -872,16 +1253,19 @@ async function offeringDialog(offering, model, settings) {
       };
       if (offering) payload.version = offering.version;
       submit.disabled = true;
+      publishStatus.textContent = enabled.checked ? '正在检查模型连通性…' : '正在保存未公开条目…';
       await api(offering ? '/offerings/' + encodeURIComponent(offering.public_id) : '/offerings', { method: offering ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
       dialog.close();
       notify(offering ? '公开模型已更新' : '公开模型已发布');
       loadPage();
     } catch (failure) {
       error.textContent = failure.message;
+      publishStatus.textContent = '';
       submit.disabled = false;
     }
   });
   dialog.content.append(form);
+  if (!offering && model) fetchPricingReference(fetchPricing);
 }
 function cacheDialog(value) {
   const dialog = openDialog('缓存详情', true);
@@ -941,25 +1325,189 @@ async function renderList(page, route) {
 }
 async function renderSettings(page) {
   const settings = await api('/settings');
+  const service = settings.service;
   const appearanceCard = node('section', 'settings-section');
   appearanceCard.append(node('h2', '', '外观'));
-  const choices = node('div', 'appearance');
-  const update = (key, value) => {
+  const saveAppearance = (key, value) => {
     appearance[key] = value;
     applyAppearance();
     try { localStorage.setItem(preferenceKey, JSON.stringify(appearance)); } catch { notify('外观已应用，本次未能保存到设备', true); }
   };
-  choices.append(field('配色', select('配色', [['graphite', '石墨'], ['grove', '青禾'], ['indigo', '靛蓝']], appearance.palette, value => update('palette', value))));
-  choices.append(field('显示模式', select('显示模式', [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']], appearance.mode, value => update('mode', value))));
-  appearanceCard.append(choices);
+  const palettes = [['graphite', '石墨'], ['grove', '青禾'], ['indigo', '靛蓝']];
+  const paletteGroup = node('div', 'palette-options');
+  paletteGroup.setAttribute('role', 'group');
+  paletteGroup.setAttribute('aria-label', '配色方案');
+  const paletteButtons = new Map();
+  const syncPalette = () => {
+    for (const [id, option] of paletteButtons) {
+      const selected = appearance.palette === id;
+      option.classList.toggle('selected', selected);
+      option.setAttribute('aria-pressed', String(selected));
+    }
+  };
+  for (const [id, name] of palettes) {
+    const option = node('button', 'palette-option palette-' + id);
+    option.type = 'button';
+    option.dataset.default = String(id === 'graphite');
+    option.setAttribute('aria-label', '使用' + name + '配色');
+    const sample = node('span', 'palette-sample');
+    const body = node('span');
+    body.append(node('b'), node('em'), node('em'));
+    sample.append(node('i'), body);
+    const caption = node('span', 'palette-caption');
+    caption.append(node('b', '', name), icon('M5 12l4 4L19 6'), node('small', '', '默认'));
+    option.append(sample, caption);
+    option.addEventListener('click', () => { saveAppearance('palette', id); syncPalette(); });
+    paletteButtons.set(id, option);
+    paletteGroup.append(option);
+  }
+  syncPalette();
+  const themes = [
+    ['system', '跟随系统', 'M4 5h16v10H4z M9 20h6 M12 15v5'],
+    ['light', '浅色', 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1.5 1.5 M17.5 17.5L19 19 M5 19l1.5-1.5 M17.5 6.5L19 5'],
+    ['dark', '深色', 'M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z'],
+  ];
+  const themeGroup = node('div', 'theme-previews');
+  themeGroup.setAttribute('role', 'group');
+  themeGroup.setAttribute('aria-label', '界面主题');
+  const themeButtons = new Map();
+  const syncTheme = () => {
+    for (const [id, tile] of themeButtons) {
+      const selected = appearance.mode === id;
+      tile.classList.toggle('selected', selected);
+      tile.setAttribute('aria-pressed', String(selected));
+    }
+  };
+  for (const [id, label, path] of themes) {
+    const tile = node('button', 'theme-tile ' + id);
+    tile.type = 'button';
+    tile.setAttribute('aria-label', '使用' + label);
+    const preview = node('div');
+    const section = node('section');
+    section.append(node('b'), node('span'), node('span'));
+    preview.append(node('i'), section);
+    const caption = node('span');
+    caption.append(icon(path), node('span', '', label));
+    tile.append(preview, caption);
+    tile.addEventListener('click', () => { saveAppearance('mode', id); syncTheme(); });
+    themeButtons.set(id, tile);
+    themeGroup.append(tile);
+  }
+  syncTheme();
+  appearanceCard.append(paletteGroup, themeGroup);
+
+  const form = node('form', 'settings-form');
+  const caption = select('图片转述模型', [['', '未指定'], ...settings.models.map(model => [model.id, model.display_name + ' · ' + model.id])], service.caption_model_id, () => { });
+  const concurrency = input('number', 'concurrency');
+  concurrency.value = String(service.concurrency);
+  concurrency.min = '1';
+  concurrency.max = '16';
+  const timeout = input('number', 'timeout_seconds');
+  timeout.value = String(service.timeout_seconds);
+  timeout.min = '5';
+  timeout.max = '300';
+  const maxOutput = input('number', 'max_output_tokens');
+  maxOutput.value = String(service.max_output_tokens);
+  maxOutput.min = '1';
+  maxOutput.max = '32768';
+  const cacheTTL = input('number', 'cache_ttl_days');
+  cacheTTL.value = String(service.cache_ttl_days);
+  cacheTTL.min = '1';
+  cacheTTL.max = '365';
+  const cacheMax = input('number', 'cache_max_ttl_days');
+  cacheMax.value = String(service.cache_max_ttl_days);
+  cacheMax.min = '1';
+  cacheMax.max = '365';
+  const shared = input('checkbox', 'shared_cache_enabled');
+  shared.required = false;
+  shared.checked = service.shared_cache_enabled;
+  const catalogTTL = input('number', 'pricing_catalog_ttl_hours');
+  catalogTTL.value = String(service.pricing_catalog_ttl_hours);
+  catalogTTL.min = '1';
+  catalogTTL.max = '720';
+  const exchangeTTL = input('number', 'pricing_exchange_ttl_hours');
+  exchangeTTL.value = String(service.pricing_exchange_ttl_hours);
+  exchangeTTL.min = '1';
+  exchangeTTL.max = '720';
+  const cacheStatus = node('p', 'settings-cache-status');
+  cacheStatus.setAttribute('role', 'status');
+  const renderCacheStatus = status => {
+    const parts = [];
+    if (status?.catalog_cached_at) parts.push(status.catalog_entries + ' 个提供商 · 更新于 ' + formatTime(status.catalog_cached_at));
+    if (status?.exchange_date) parts.push('汇率 ' + status.exchange_date);
+    cacheStatus.textContent = parts.length ? parts.join(' · ') : '尚未缓存价格来源';
+    cacheStatus.classList.toggle('is-stale', !!status?.stale);
+    if (status?.stale) cacheStatus.textContent += ' · 缓存已过期';
+  };
+  renderCacheStatus(settings.pricing_cache);
+  const refreshCache = button('立即刷新', async element => {
+    element.disabled = true;
+    try {
+      const result = await api('/settings/pricing-cache/refresh', { method: 'POST', body: '{}' });
+      renderCacheStatus(result.pricing_cache);
+      notify('价格缓存已刷新');
+    } catch (failure) {
+      notify(failure.message || '刷新失败，将继续使用现有缓存', true);
+    } finally {
+      element.disabled = false;
+    }
+  });
+  const note = node('p', 'settings-note');
+  note.setAttribute('role', 'status');
+  if (settings.restart_required) {
+    note.hidden = false;
+    note.textContent = '服务参数已保存，重启题库服务后生效。价格缓存已立即生效。';
+  } else {
+    note.hidden = true;
+  }
+  const error = node('p', 'form-error');
+  error.setAttribute('role', 'alert');
+  const submit = node('button', 'primary', '保存设置');
+  submit.type = 'submit';
+  form.append(
+    formSection('查询与模型', field('图片转述模型', caption), field('同时处理查询', concurrency), field('查询超时（秒）', timeout), field('最大输出 token', maxOutput)),
+    formSection('公开缓存', field('默认缓存期限（天）', cacheTTL), field('最长缓存期限（天）', cacheMax), checkField(shared, '启用共享缓存')),
+    formSection('价格参考缓存', field('模型目录缓存（小时）', catalogTTL), field('汇率缓存（小时）', exchangeTTL), cacheStatus, refreshCache),
+    node('p', 'field-hint', '查询与公开缓存参数保存后需重启题库服务生效；价格缓存期限立即生效。'),
+    note, error, submit,
+  );
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    error.textContent = '';
+    submit.disabled = true;
+    try {
+      const payload = {
+        caption_model_id: caption.value,
+        concurrency: Number(concurrency.value),
+        timeout_seconds: Number(timeout.value),
+        max_output_tokens: Number(maxOutput.value),
+        cache_ttl_days: Number(cacheTTL.value),
+        cache_max_ttl_days: Number(cacheMax.value),
+        shared_cache_enabled: shared.checked,
+        pricing_catalog_ttl_hours: Number(catalogTTL.value),
+        pricing_exchange_ttl_hours: Number(exchangeTTL.value),
+      };
+      const result = await api('/settings', { method: 'PATCH', body: JSON.stringify(payload) });
+      renderCacheStatus(result.pricing_cache);
+      note.hidden = !result.restart_required;
+      note.textContent = result.restart_required ? '服务参数已保存，重启题库服务后生效。价格缓存已立即生效。' : '';
+      notify(result.audit_pending ? '设置已保存，操作记录待核对' : result.restart_required ? '设置已保存，服务参数重启后生效' : '设置已保存');
+    } catch (failure) {
+      error.textContent = failure.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
   const serviceCard = node('section', 'settings-section');
-  serviceCard.append(node('h2', '', '当前服务设置'), detailGrid([
-    ['默认缓存期限', settings.cache_ttl_days + ' 天'], ['最长缓存期限', settings.cache_max_ttl_days + ' 天'], ['共享缓存', settings.shared_cache_enabled ? '已启用' : '未启用'],
-    ['默认公开条目', settings.default_offering_id || '未指定'], ['已发布条目', settings.published_offering_count + ' / ' + settings.offering_count],
-    ['图片转述模型', settings.caption_model_id || '未指定'], ['配置模型数量', settings.model_count],
-    ['同时处理查询', settings.concurrency], ['查询超时', settings.timeout_seconds + ' 秒'], ['最大输出 token', formatNumber(settings.max_output_tokens)],
+  serviceCard.append(node('h2', '', '服务设置'), form);
+  const statsCard = node('section', 'settings-section');
+  statsCard.append(node('h2', '', '运行信息'), detailGrid([
+    ['配置模型', settings.model_count], ['公开条目', settings.published_offering_count + ' / ' + settings.offering_count],
+    ['默认公开条目', settings.default_offering_id || '未指定'],
   ]));
-  page.append(appearanceCard, serviceCard);
+  page.append(appearanceCard, serviceCard, statsCard);
 }
 const pageViews = new Map();
 function loadingSurface() {

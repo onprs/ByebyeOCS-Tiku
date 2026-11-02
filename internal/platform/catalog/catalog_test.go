@@ -41,6 +41,37 @@ func TestPublicIDAndPricingValidation(t *testing.T) {
 	}
 }
 
+func TestCachePricingValidationAndFreeDetection(t *testing.T) {
+	cacheRead, cacheWrite := Micros(0), Micros(3)
+	price := &Pricing{Version: "cache-v1", InputMicrosPerMillionTokens: 0,
+		OutputMicrosPerMillionTokens: 0, CacheReadMicrosPerMillionTokens: &cacheRead,
+		CacheWriteMicrosPerMillionTokens: &cacheWrite, MicrosPerMinor: 10000,
+		Rounding: "ceil", Rule: "tokens_x_micros_per_million_v1"}
+	if err := price.Validate(); err != nil || price.Free() {
+		t.Fatalf("缓存创建费率未参与有效性和免费判定：%v", err)
+	}
+	negative := Micros(-1)
+	price.CacheWriteMicrosPerMillionTokens = &negative
+	if price.Validate() == nil {
+		t.Fatal("接受负缓存创建费率")
+	}
+}
+
+func TestPricingReferenceMetadataIsValidated(t *testing.T) {
+	price := &Pricing{Version: "reference-v1", InputMicrosPerMillionTokens: 1, OutputMicrosPerMillionTokens: 1,
+		MicrosPerMinor: 10000, Rounding: "ceil", Rule: "tokens_x_micros_per_million_v1",
+		Reference: &PricingReference{Source: "models.dev", SourceURL: "https://models.dev/api.json",
+			Exchange: "Frankfurter", ExchangeURL: "https://api.frankfurter.dev/v2/rate/usd/cny",
+			ExchangeDate: "2026-10-30", ExchangeRate: "6.6572"}}
+	if err := price.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	price.Reference.SourceURL = "https://attacker.invalid/catalog.json"
+	if err := price.Validate(); err == nil {
+		t.Fatal("接受伪造的价格参考来源")
+	}
+}
+
 func TestOfferingNormalize(t *testing.T) {
 	item := Offering{
 		DisplayName: " 标准模型 ", Description: " 说明 ", ProviderRef: " standard ",

@@ -68,11 +68,15 @@ func ImagePart(data []byte) ContentPart {
 // TokenUsage 是服务端返回的 token 事实。Present 表示上游是否给出 usage；
 // Complete 表示字段齐全且 total 等于 input + output。缺失时不补 0。
 type TokenUsage struct {
-	Present      bool
-	Complete     bool
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
+	Present           bool
+	Complete          bool
+	InputTokens       int64
+	OutputTokens      int64
+	TotalTokens       int64
+	CacheReadTokens   int64
+	CacheWriteTokens  int64
+	CacheReadPresent  bool
+	CacheWritePresent bool
 }
 
 // Result 是一次模型调用的正文、推理内容和用量。
@@ -109,14 +113,20 @@ func (c *Client) Chat(ctx context.Context, service ServiceConfig, model ModelCon
 	}
 	return Result{
 		Content: output.Content, Reasoning: output.ReasoningContent,
-		Usage: usageFromMessage(output), Latency: time.Since(start),
+		Usage: usageFromMessage(output, service.Protocol), Latency: time.Since(start),
 	}, nil
 }
 
-const usagePresenceKey = "ocs_usage_present"
+const (
+	usagePresenceKey      = "ocs_usage_present"
+	cacheReadPresenceKey  = "ocs_cache_read_present"
+	cacheWritePresenceKey = "ocs_cache_write_present"
+	cacheReadValueKey     = "ocs_cache_read_tokens"
+	cacheWriteValueKey    = "ocs_cache_write_tokens"
+)
 
-// responseOptions 让 OpenAI 兼容调用保留 raw body 的 usage 是否存在。
-// eino 在缺少 usage 时仍会给出全 0 的非空指针，不能据此认定用量完整。
+// responseOptions 让 OpenAI 兼容调用保留 raw body 中 usage 和缓存分项的存在状态。
+// eino 会把缺失数值补成 0，不能据此把未知缓存用量当作没有缓存用量。
 func responseOptions(service ServiceConfig) []einomodel.Option {
 	if service.Protocol != ProtocolOpenAIChat {
 		return nil
@@ -126,10 +136,15 @@ func responseOptions(service ServiceConfig) []einomodel.Option {
 			return message, nil
 		}
 		present := usageFieldsPresent(rawBody)
+		cacheReadTokens, cacheReadPresent, cacheWriteTokens, cacheWritePresent := usageCacheFields(rawBody)
 		if message.Extra == nil {
 			message.Extra = map[string]any{}
 		}
 		message.Extra[usagePresenceKey] = present
+		message.Extra[cacheReadPresenceKey] = cacheReadPresent
+		message.Extra[cacheWritePresenceKey] = cacheWritePresent
+		message.Extra[cacheReadValueKey] = cacheReadTokens
+		message.Extra[cacheWriteValueKey] = cacheWriteTokens
 		return message, nil
 	})}
 }
@@ -152,6 +167,42 @@ func usageFieldsPresent(rawBody []byte) bool {
 	return true
 }
 
+func usageCacheFields(rawBody []byte) (int64, bool, int64, bool) {
+	var payload struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(rawBody, &payload); err != nil || payload.Usage == nil {
+		return 0, false, 0, false
+	}
+	var details map[string]json.RawMessage
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details", "promptTokenDetails"} {
+		if value := payload.Usage[key]; len(value) > 0 && string(value) != "null" {
+			_ = json.Unmarshal(value, &details)
+			if details != nil {
+				break
+			}
+		}
+	}
+	read, readPresent := readUsageValue(details, "cached_tokens", "cache_read_tokens", "cachedTokens")
+	write, writePresent := readUsageValue(details, "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens", "cacheWriteTokens")
+	return read, readPresent, write, writePresent
+}
+
+func readUsageValue(details map[string]json.RawMessage, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		value, ok := details[key]
+		if !ok || len(value) == 0 || string(value) == "null" {
+			continue
+		}
+		var count int64
+		if json.Unmarshal(value, &count) == nil && count >= 0 {
+			return count, true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
 // ChatText 保留上游只返回正文与推理内容的调用方式。
 func (c *Client) ChatText(ctx context.Context, service ServiceConfig, model ModelConfig, messages []ChatMessage, temperature float64, tokens int) (string, string, error) {
 	result, err := c.Chat(ctx, service, model, messages, temperature, tokens)
@@ -161,7 +212,7 @@ func (c *Client) ChatText(ctx context.Context, service ServiceConfig, model Mode
 	return result.Content, result.Reasoning, nil
 }
 
-func usageFromMessage(message *schema.Message) TokenUsage {
+func usageFromMessage(message *schema.Message, protocol string) TokenUsage {
 	if message == nil {
 		return TokenUsage{}
 	}
@@ -176,10 +227,27 @@ func usageFromMessage(message *schema.Message) TokenUsage {
 	if total <= 0 {
 		return TokenUsage{}
 	}
-	return TokenUsage{
-		Present: true, Complete: prompt >= 0 && completion >= 0 && total == prompt+completion,
-		InputTokens: prompt, OutputTokens: completion, TotalTokens: total,
+	cacheReadTokens, cacheWriteTokens := int64(usage.PromptTokenDetails.CachedTokens), int64(usage.PromptTokenDetails.CacheWriteTokens)
+	cacheReadPresent, cacheWritePresent := false, false
+	switch protocol {
+	case ProtocolOpenAIChat:
+		cacheReadTokens, _ = message.Extra[cacheReadValueKey].(int64)
+		cacheWriteTokens, _ = message.Extra[cacheWriteValueKey].(int64)
+		cacheReadPresent, _ = message.Extra[cacheReadPresenceKey].(bool)
+		cacheWritePresent, _ = message.Extra[cacheWritePresenceKey].(bool)
+	case ProtocolAnthropicMessages:
+		cacheReadPresent, cacheWritePresent = true, true
+	case ProtocolGeminiGenerate:
+		cacheReadPresent = true
 	}
+	result := TokenUsage{
+		Present: true, Complete: prompt >= 0 && completion >= 0 && total == prompt+completion &&
+			cacheReadTokens >= 0 && cacheWriteTokens >= 0 && cacheReadTokens <= prompt && cacheWriteTokens <= prompt-cacheReadTokens,
+		InputTokens: prompt, OutputTokens: completion, TotalTokens: total,
+		CacheReadTokens: cacheReadTokens, CacheWriteTokens: cacheWriteTokens,
+		CacheReadPresent: cacheReadPresent, CacheWritePresent: cacheWritePresent,
+	}
+	return result
 }
 
 // Describe 使用图片转述模型把图片转换为文字描述。

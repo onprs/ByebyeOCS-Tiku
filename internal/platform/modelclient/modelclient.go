@@ -28,10 +28,12 @@ type Error struct {
 func (e *Error) Error() string { return e.Message }
 
 type TokenUsage struct {
-	InputTokens  *int64
-	OutputTokens *int64
-	TotalTokens  *int64
-	Complete     bool
+	InputTokens      *int64
+	OutputTokens     *int64
+	TotalTokens      *int64
+	CacheReadTokens  *int64
+	CacheWriteTokens *int64
+	Complete         bool
 }
 
 type Result struct {
@@ -62,6 +64,7 @@ type Options struct {
 
 type Client struct {
 	engine *engine.Client
+	http   *http.Client
 }
 
 // maxUpstreamResponseBytes 限制模型响应体，避免忽略预算后无限读取 JSON。
@@ -90,10 +93,11 @@ func NewWithOptions(opts Options) (*Client, error) {
 	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		// 不使用环境代理，避免代理绕过目标 IP 校验。
-		DialContext:           guardedDial(dialer, opts.AllowLoopback),
-		TLSClientConfig:       tlsConfig,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 85 * time.Second,
+		DialContext:         guardedDial(dialer, opts.AllowLoopback),
+		TLSClientConfig:     tlsConfig,
+		TLSHandshakeTimeout: 10 * time.Second,
+		// 头超时不能短于整体截止时间：推理模型在出首字节前可能长时间无响应。
+		ResponseHeaderTimeout: opts.Timeout,
 		MaxIdleConns:          32,
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       60 * time.Second,
@@ -104,7 +108,7 @@ func NewWithOptions(opts Options) (*Client, error) {
 		// 重定向可能绕过目标校验；模型端点不需要重定向。
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("上游重定向已拒绝") },
 	}
-	return &Client{engine: engine.NewClientWithHTTP(httpClient)}, nil
+	return &Client{engine: engine.NewClientWithHTTP(httpClient), http: httpClient}, nil
 }
 
 // boundedTransport 在传输层限制响应体大小，覆盖所有协议客户端读取路径。
@@ -264,7 +268,8 @@ func usageFromEngine(usage engine.TokenUsage) TokenUsage {
 		return TokenUsage{}
 	}
 	input, output, total := usage.InputTokens, usage.OutputTokens, usage.TotalTokens
-	result := TokenUsage{Complete: usage.Complete && input >= 0 && output >= 0 && total >= 0}
+	cacheRead, cacheWrite := usage.CacheReadTokens, usage.CacheWriteTokens
+	result := TokenUsage{Complete: usage.Complete && input >= 0 && output >= 0 && total >= 0 && cacheRead >= 0 && cacheWrite >= 0}
 	if input >= 0 {
 		result.InputTokens = &input
 	}
@@ -273,6 +278,12 @@ func usageFromEngine(usage engine.TokenUsage) TokenUsage {
 	}
 	if total >= 0 {
 		result.TotalTokens = &total
+	}
+	if usage.CacheReadPresent && cacheRead >= 0 {
+		result.CacheReadTokens = &cacheRead
+	}
+	if usage.CacheWritePresent && cacheWrite >= 0 {
+		result.CacheWriteTokens = &cacheWrite
 	}
 	return result
 }
@@ -316,14 +327,9 @@ func safeMessage(code string) string {
 	}
 }
 
-// Reachability 只检查网络/认证可达性，不产生回答 token。
+// Reachability 检查提供商模型目录接口的网络与认证可达性，不产生回答 token。
+// 目录接口按协议选择，OpenAI、Anthropic、Gemini 和 Ollama 均支持。
 func (c *Client) Reachability(ctx context.Context, protocol, baseURL, apiKey string) error {
-	if protocol == "" {
-		protocol = engine.ProtocolOpenAIChat
-	}
-	err := c.engine.Reachability(ctx, engine.ServiceConfig{Protocol: protocol, BaseURL: baseURL, APIKey: apiKey})
-	if err == nil {
-		return nil
-	}
-	return mapError(err)
+	_, err := c.DiscoverModels(ctx, protocol, baseURL, apiKey)
+	return err
 }

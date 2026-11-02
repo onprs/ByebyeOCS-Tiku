@@ -58,8 +58,16 @@ func (f *fakeLLM) counts() (int, int) {
 
 func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/models") {
+		f.mu.Lock()
+		mode := f.mode
+		f.mu.Unlock()
+		if mode == "discovery_rate_limited" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"provider-private-key https://internal.example"}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"fake-answer","owned_by":"fixture"}]}`))
 		return
 	}
 	if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/chat/completions") {

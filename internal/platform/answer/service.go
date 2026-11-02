@@ -65,23 +65,27 @@ type CacheInfo struct {
 }
 
 type Call struct {
-	Slot          string `json:"slot"`
-	ModelID       string `json:"-"`
-	InputTokens   *int64 `json:"input_tokens"`
-	OutputTokens  *int64 `json:"output_tokens"`
-	TotalTokens   *int64 `json:"total_tokens"`
-	UsageComplete bool   `json:"-"`
-	Status        string `json:"status"`
-	LatencyMS     int64  `json:"latency_ms"`
-	ErrorCode     string `json:"error_code,omitempty"`
+	Slot             string `json:"slot"`
+	ModelID          string `json:"-"`
+	InputTokens      *int64 `json:"input_tokens"`
+	OutputTokens     *int64 `json:"output_tokens"`
+	TotalTokens      *int64 `json:"total_tokens"`
+	CacheReadTokens  *int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens *int64 `json:"cache_write_tokens,omitempty"`
+	UsageComplete    bool   `json:"-"`
+	Status           string `json:"status"`
+	LatencyMS        int64  `json:"latency_ms"`
+	ErrorCode        string `json:"error_code,omitempty"`
 }
 
 type Usage struct {
-	InputTokens  *int64 `json:"input_tokens"`
-	OutputTokens *int64 `json:"output_tokens"`
-	TotalTokens  *int64 `json:"total_tokens"`
-	Complete     bool   `json:"complete"`
-	Calls        []Call `json:"calls"`
+	InputTokens      *int64 `json:"input_tokens"`
+	OutputTokens     *int64 `json:"output_tokens"`
+	TotalTokens      *int64 `json:"total_tokens"`
+	CacheReadTokens  *int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens *int64 `json:"cache_write_tokens,omitempty"`
+	Complete         bool   `json:"complete"`
+	Calls            []Call `json:"calls"`
 }
 
 type Response struct {
@@ -563,7 +567,7 @@ func (s *Service) solve(ctx context.Context, model *config.Model, modelKey strin
 	}
 	usage.Complete = usage.Complete && result.Usage.Complete
 	if usage.Complete {
-		usage.InputTokens, usage.OutputTokens, usage.TotalTokens = sumUsage(calls)
+		usage.InputTokens, usage.OutputTokens, usage.TotalTokens, usage.CacheReadTokens, usage.CacheWriteTokens = sumUsage(calls)
 		usage.Complete = usage.InputTokens != nil && usage.OutputTokens != nil && usage.TotalTokens != nil
 	}
 	answer := ExtractAnswer(result.Content, result.Reasoning, q.Type)
@@ -598,7 +602,8 @@ func callErrorCode(err error) string {
 
 func callFromResult(slot, modelID string, result modelclient.Result, err error) Call {
 	call := Call{Slot: slot, ModelID: modelID, Status: "ok", LatencyMS: result.Latency.Milliseconds(), UsageComplete: result.Usage.Complete,
-		InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens, TotalTokens: result.Usage.TotalTokens}
+		InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens, TotalTokens: result.Usage.TotalTokens,
+		CacheReadTokens: result.Usage.CacheReadTokens, CacheWriteTokens: result.Usage.CacheWriteTokens}
 	if err != nil {
 		call.Status = "error"
 		call.ErrorCode = callErrorCode(err)
@@ -606,20 +611,38 @@ func callFromResult(slot, modelID string, result modelclient.Result, err error) 
 	return call
 }
 
-func sumUsage(calls []Call) (*int64, *int64, *int64) {
-	var input, output, total int64
+func sumUsage(calls []Call) (*int64, *int64, *int64, *int64, *int64) {
+	var input, output, total, cacheRead, cacheWrite int64
+	cacheReadKnown, cacheWriteKnown := true, true
 	for _, call := range calls {
 		if call.InputTokens == nil || call.OutputTokens == nil || call.TotalTokens == nil ||
 			*call.InputTokens < 0 || *call.OutputTokens < 0 || *call.TotalTokens < 0 ||
 			*call.InputTokens > math.MaxInt64-input || *call.OutputTokens > math.MaxInt64-output ||
 			*call.TotalTokens > math.MaxInt64-total {
-			return nil, nil, nil
+			return nil, nil, nil, nil, nil
 		}
 		input += *call.InputTokens
 		output += *call.OutputTokens
 		total += *call.TotalTokens
+		if call.CacheReadTokens == nil || *call.CacheReadTokens < 0 || *call.CacheReadTokens > math.MaxInt64-cacheRead {
+			cacheReadKnown = false
+		} else if cacheReadKnown {
+			cacheRead += *call.CacheReadTokens
+		}
+		if call.CacheWriteTokens == nil || *call.CacheWriteTokens < 0 || *call.CacheWriteTokens > math.MaxInt64-cacheWrite {
+			cacheWriteKnown = false
+		} else if cacheWriteKnown {
+			cacheWrite += *call.CacheWriteTokens
+		}
 	}
-	return &input, &output, &total
+	var readResult, writeResult *int64
+	if cacheReadKnown {
+		readResult = &cacheRead
+	}
+	if cacheWriteKnown {
+		writeResult = &cacheWrite
+	}
+	return &input, &output, &total, readResult, writeResult
 }
 
 func mapClientError(err error) error {
@@ -653,7 +676,7 @@ func (s *Service) recordUnknownQuery(ctx context.Context, req Request, modelID, 
 	}
 	partial := Usage{Complete: false, Calls: usage.Calls}
 	if len(known) > 0 {
-		partial.InputTokens, partial.OutputTokens, partial.TotalTokens = sumUsage(known)
+		partial.InputTokens, partial.OutputTokens, partial.TotalTokens, partial.CacheReadTokens, partial.CacheWriteTokens = sumUsage(known)
 	}
 	persistCtx, cancel := persistContext(ctx)
 	defer cancel()
@@ -778,6 +801,11 @@ func (s *Service) SetModelDisabled(ctx context.Context, modelID string, disabled
 	return nil
 }
 
+// DiscoverModels 从已保存的提供商连接读取上游模型目录；密钥只在服务端内存中使用。
+func (s *Service) DiscoverModels(ctx context.Context, protocol, baseURL, apiKey string) ([]modelclient.DiscoveredModel, error) {
+	return s.client.DiscoverModels(ctx, protocol, baseURL, apiKey)
+}
+
 func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCost bool) (TestResult, error) {
 	model, modelKey := s.models.Resolve(modelID)
 	if model == nil {
@@ -833,7 +861,7 @@ func (s *Service) TestModel(ctx context.Context, modelID, kind string, confirmCo
 			call := callFromResult("answer", model.ID, response, nil)
 			u := Usage{Complete: response.Usage.Complete, Calls: []Call{call}}
 			if u.Complete {
-				u.InputTokens, u.OutputTokens, u.TotalTokens = sumUsage(u.Calls)
+				u.InputTokens, u.OutputTokens, u.TotalTokens, u.CacheReadTokens, u.CacheWriteTokens = sumUsage(u.Calls)
 			}
 			usage = &u
 			result.Usage = usage

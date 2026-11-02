@@ -58,10 +58,11 @@ func LoadCredentials(cfg config.Panel) (map[string]string, error) {
 }
 
 type session struct {
-	Username string    `json:"username"`
-	Role     string    `json:"role"`
-	CSRF     string    `json:"csrf_token"`
-	Expires  time.Time `json:"expires_at"`
+	Username  string    `json:"username"`
+	Role      string    `json:"role"`
+	CSRF      string    `json:"csrf_token"`
+	Expires   time.Time `json:"expires_at"`
+	AutoLogin bool      `json:"local_auto_login,omitempty"`
 }
 
 type loginWindow struct {
@@ -74,6 +75,7 @@ type authentication struct {
 	attempts  map[string]loginWindow
 	hashes    map[string]string
 	roles     map[string]string
+	localUser string
 	dummy     string
 	semaphore chan struct{}
 }
@@ -84,14 +86,19 @@ func newAuthentication(cfg config.Panel) (*authentication, error) {
 		return nil, err
 	}
 	roles := make(map[string]string)
+	localUser := ""
 	for _, account := range cfg.Users {
 		roles[account.Username] = account.Role
+		if localUser == "" && account.Role == "maintainer" {
+			localUser = account.Username
+		}
 	}
 	dummy, err := HashPassword("unavailable-maintenance-account")
 	if err != nil {
 		return nil, err
 	}
-	return &authentication{sessions: make(map[[32]byte]session), attempts: make(map[string]loginWindow), hashes: hashes, roles: roles, dummy: dummy, semaphore: make(chan struct{}, 2)}, nil
+	return &authentication{sessions: make(map[[32]byte]session), attempts: make(map[string]loginWindow), hashes: hashes,
+		roles: roles, localUser: localUser, dummy: dummy, semaphore: make(chan struct{}, 2)}, nil
 }
 
 func randomToken() (string, error) {
@@ -164,6 +171,18 @@ func (a *authentication) remove(r *http.Request) {
 }
 
 func (a *authentication) create(username string) (string, session, error) {
+	return a.createSession(username, false)
+}
+
+// createLocal 为回环本地预览建立维护员会话，不经过密码校验。
+func (a *authentication) createLocal() (string, session, error) {
+	if a.localUser == "" {
+		return "", session{}, errors.New("没有可用的维护员账号")
+	}
+	return a.createSession(a.localUser, true)
+}
+
+func (a *authentication) createSession(username string, autoLogin bool) (string, session, error) {
 	token, err := randomToken()
 	if err != nil {
 		return "", session{}, err
@@ -173,7 +192,7 @@ func (a *authentication) create(username string) (string, session, error) {
 		return "", session{}, err
 	}
 	now := time.Now()
-	value := session{Username: username, Role: a.roles[username], CSRF: csrf, Expires: now.Add(8 * time.Hour)}
+	value := session{Username: username, Role: a.roles[username], CSRF: csrf, Expires: now.Add(8 * time.Hour), AutoLogin: autoLogin}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for key, existing := range a.sessions {
@@ -198,4 +217,25 @@ func setCookie(w http.ResponseWriter, token string, secure bool, maxAge int) {
 
 func validOrigin(r *http.Request, origin string) bool {
 	return r.Header.Get("Origin") == origin && !strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")
+}
+
+// loopbackRequest 只认直接连接的回环地址和回环 Host，不信任转发头，避免域名重绑定。
+func loopbackRequest(r *http.Request) bool {
+	remote := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		remote = host
+	}
+	if ip := net.ParseIP(strings.Trim(remote, "[]")); ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	host := r.Host
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -219,7 +219,7 @@ func (c *Catalog) Lookup(vendor, model string) Match {
 // finish 在命中条目带有规范模型标识时改用规范条目的能力。
 func (c *Catalog) finish(m Match) Match {
 	if m.Entry.Canonical != "" {
-		if entry, ok := c.byKey[m.Entry.Canonical]; ok {
+		if entry, ok := c.byKey[m.Entry.Canonical]; ok && entry.Name == m.Entry.Name {
 			m.Entry = entry
 			m.Method = "canonical"
 		}

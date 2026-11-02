@@ -115,10 +115,19 @@ func (s *Service) Update(ctx context.Context, actor, publicID string, version in
 }
 
 func (s *Service) PriceVersions(ctx context.Context, publicID string) ([]PriceVersion, error) {
-	if _, err := s.store.Get(ctx, publicID); err != nil {
+	exists, err := s.store.Exists(ctx, publicID)
+	if err != nil {
 		return nil, err
 	}
+	if !exists {
+		return nil, ErrNotFound
+	}
 	return s.store.PriceVersions(ctx, publicID)
+}
+
+// Delete 从当前目录移除条目并释放模型绑定，保留价格与既有查询结算历史。
+func (s *Service) Delete(ctx context.Context, actor, publicID string, version int64) error {
+	return s.store.Delete(ctx, actor, publicID, version)
 }
 
 // Retire 关闭条目的可见性与默认状态；即使配置模型已被移除也可执行。

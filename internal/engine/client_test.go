@@ -48,7 +48,8 @@ func TestChatReturnsRealUsageOverTLS(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{map[string]any{"message": map[string]any{"content": "<answer>A</answer>"}}},
-			"usage":   map[string]int{"prompt_tokens": 123, "completion_tokens": 7, "total_tokens": 130},
+			"usage": map[string]any{"prompt_tokens": 123, "completion_tokens": 7, "total_tokens": 130,
+				"prompt_tokens_details": map[string]int{"cached_tokens": 50, "cache_write_tokens": 5}},
 		})
 	})
 	result, err := client.Chat(context.Background(), ServiceConfig{
@@ -60,8 +61,20 @@ func TestChatReturnsRealUsageOverTLS(t *testing.T) {
 	if requests != 1 || result.Content != "<answer>A</answer>" {
 		t.Fatalf("调用事实不符: requests=%d content=%q", requests, result.Content)
 	}
-	if !result.Usage.Present || !result.Usage.Complete || result.Usage.InputTokens != 123 || result.Usage.OutputTokens != 7 || result.Usage.TotalTokens != 130 {
-		t.Fatalf("真实 usage 未返回: %+v", result.Usage)
+	if !result.Usage.Present || !result.Usage.Complete || result.Usage.InputTokens != 123 || result.Usage.OutputTokens != 7 || result.Usage.TotalTokens != 130 ||
+		result.Usage.CacheReadTokens != 50 || !result.Usage.CacheReadPresent || result.Usage.CacheWriteTokens != 5 || !result.Usage.CacheWritePresent {
+		t.Fatalf("真实 usage 未返回或缓存分项错误: %+v", result.Usage)
+	}
+}
+
+func TestUsageCacheFieldsPreserveMissingAndPresentZero(t *testing.T) {
+	read, readPresent, write, writePresent := usageCacheFields([]byte(`{"usage":{"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}}`))
+	if !readPresent || !writePresent || read != 0 || write != 0 {
+		t.Fatalf("显式零缓存用量没有保留字段存在性：%d/%v %d/%v", read, readPresent, write, writePresent)
+	}
+	_, readPresent, _, writePresent = usageCacheFields([]byte(`{"usage":{"prompt_tokens":10}}`))
+	if readPresent || writePresent {
+		t.Fatal("缺失缓存分项被解释为零用量")
 	}
 }
 

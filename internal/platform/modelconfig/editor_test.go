@@ -97,3 +97,42 @@ func TestEditorRejectsInvalidModelWithoutRewritingConfig(t *testing.T) {
 		t.Fatal("校验失败仍改写了配置文件")
 	}
 }
+
+func TestEditorUpdateServiceSettingsPersistsAndValidates(t *testing.T) {
+	editor, _, path := newEditorFixture(t)
+	input := Input{DisplayName: "保留模型", Protocol: "openai-chat", BaseURL: "https://models.example.com/v1",
+		UpstreamModel: "upstream-1", APIKey: "settings-key", Context: 128000, MaxOutputTokens: 512}
+	if _, err := editor.Upsert(true, "kept-model", input); err != nil {
+		t.Fatal(err)
+	}
+	settings := ServiceSettings{CaptionModelID: "kept-model", Concurrency: 3, TimeoutSeconds: 45, MaxOutputTokens: 512,
+		CacheTTLDays: 5, CacheMaxTTLDays: 20, SharedCache: true, PricingCatalogTTLHours: 12, PricingExchangeTTLHours: 36}
+	if err := editor.UpdateServiceSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Models) != 1 || loaded.Models[0].ID != "kept-model" || loaded.Limits.Concurrency != 3 ||
+		loaded.Limits.TimeoutSeconds != 45 || loaded.Limits.MaxOutputTokens != 512 || loaded.Cache.TTLDays != 5 ||
+		loaded.Cache.MaxTTLDays != 20 || !loaded.Cache.SharedEnabled || loaded.CaptionModelID != "kept-model" ||
+		loaded.PricingCache.CatalogTTLHours != 12 || loaded.PricingCache.ExchangeTTLHours != 36 {
+		t.Fatalf("服务设置未完整持久化：%+v", loaded)
+	}
+	before, _ := os.ReadFile(path)
+	invalid := settings
+	invalid.Concurrency = 0
+	if err := editor.UpdateServiceSettings(invalid); err == nil {
+		t.Fatal("无效的服务设置被接受")
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("无效设置改写了配置文件")
+	}
+	invalid = settings
+	invalid.CaptionModelID = "missing-model"
+	if err := editor.UpdateServiceSettings(invalid); err == nil {
+		t.Fatal("不存在的图片转述模型被接受")
+	}
+}

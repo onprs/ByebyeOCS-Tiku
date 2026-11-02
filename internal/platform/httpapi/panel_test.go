@@ -130,6 +130,18 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if status, _, _ := request(viewer, "PATCH", "/panel/api/models/standard", viewerCSRF, map[string]bool{"enabled": false}, nil); status != 403 {
 		t.Fatal("只读账号修改了模型")
 	}
+	status, _, overviewData := request(client, "GET", "/panel/api/overview", "", nil, nil)
+	var overview struct {
+		Daily []struct {
+			Date      string `json:"date"`
+			Queries   int    `json:"queries"`
+			CacheHits int    `json:"cache_hits"`
+		} `json:"daily"`
+	}
+	if status != 200 || json.Unmarshal(overviewData, &overview) != nil || len(overview.Daily) != 14 ||
+		overview.Daily[0].Date == "" || overview.Daily[13].Date == "" {
+		t.Fatal("运行总览缺少连续 14 天趋势数据", status, string(overviewData))
+	}
 	if status, _, _ := request(client, "PATCH", "/panel/api/models/standard", csrf, map[string]bool{"enabled": false}, nil); status != 200 {
 		t.Fatal("维护员停用模型失败", status)
 	}
@@ -179,8 +191,12 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 			"display_name": "公开标准模型", "description": "面板发布条目", "provider_ref": "standard",
 			"capabilities": []string{"text"}, "enabled": true, "is_default": true, "sort_order": 3,
 			"pricing": map[string]any{"version": "panel-price-v1", "input_micros_per_million_tokens": rate,
-				"output_micros_per_million_tokens": "2000000", "micros_per_minor": "10000",
-				"rounding": "ceil", "rule": "tokens_x_micros_per_million_v1"},
+				"output_micros_per_million_tokens": "2000000", "cache_read_micros_per_million_tokens": "500000",
+				"cache_write_micros_per_million_tokens": "1500000",
+				"reference": map[string]any{"source": "models.dev", "source_url": "https://models.dev/api.json",
+					"exchange_source": "Frankfurter", "exchange_url": "https://api.frankfurter.dev/v2/rate/usd/cny",
+					"exchange_date": "2026-10-30", "exchange_rate": "6.6572"},
+				"micros_per_minor": "10000", "rounding": "ceil", "rule": "tokens_x_micros_per_million_v1"},
 			"cache_policy": map[string]any{"allow": true, "scope": "user", "ttl_days": 7},
 		}
 	}
@@ -190,21 +206,34 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if status, _, data := request(client, "POST", "/panel/api/offerings", csrf, map[string]any{"display_name": "无效引用", "provider_ref": "missing-model", "capabilities": []string{"text"}, "enabled": true, "is_default": false, "cache_policy": map[string]any{"allow": true, "scope": "user", "ttl_days": 7}}, nil); status != 422 {
 		t.Fatal("不存在的模型引用没有被拒绝", status, string(data))
 	}
+	f.llm.setMode("discovery_rate_limited")
+	status, _, data = request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil)
+	f.llm.setMode("")
+	if status != http.StatusTooManyRequests || !bytes.Contains(data, []byte(`"code":"upstream_rate_limited"`)) {
+		t.Fatal("上游连通检查失败时仍允许发布", status, string(data))
+	}
 	createdStatus, _, createdData := request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil)
 	if createdStatus != 201 {
 		t.Fatal("维护员发布公开条目失败", createdStatus, string(createdData))
 	}
 	var created struct {
-		ID           string `json:"id"`
-		PublicID     string `json:"public_id"`
-		Version      int64  `json:"version"`
-		PriceVersion string `json:"price_version"`
-		Health       string `json:"health"`
-		Enabled      bool   `json:"enabled"`
-		Default      bool   `json:"is_default"`
+		ID           string          `json:"id"`
+		PublicID     string          `json:"public_id"`
+		Version      int64           `json:"version"`
+		PriceVersion string          `json:"price_version"`
+		Health       string          `json:"health"`
+		Enabled      bool            `json:"enabled"`
+		Default      bool            `json:"is_default"`
+		Pricing      json.RawMessage `json:"pricing"`
 	}
-	if json.Unmarshal(createdData, &created) != nil || created.PublicID == "" || created.Version != 1 || created.PriceVersion != "panel-price-v1" || created.Health != "configured" || !created.Enabled || !created.Default {
-		t.Fatal("公开条目创建响应不完整", string(createdData))
+	if json.Unmarshal(createdData, &created) != nil || created.PublicID == "" || created.Version != 1 || created.PriceVersion != "panel-price-v1" || created.Health != "configured" || !created.Enabled || !created.Default ||
+		!bytes.Contains(created.Pricing, []byte(`"cache_read_micros_per_million_tokens":"500000"`)) ||
+		!bytes.Contains(created.Pricing, []byte(`"cache_write_micros_per_million_tokens":"1500000"`)) ||
+		!bytes.Contains(created.Pricing, []byte(`"exchange_date":"2026-10-30"`)) {
+		t.Fatal("公开条目创建响应或缓存价格快照不完整", string(createdData))
+	}
+	if status, _, data := request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil); status != http.StatusConflict || !bytes.Contains(data, []byte(`"code":"model_already_published"`)) {
+		t.Fatal("同一上游模型被允许发布第二个公开条目", status, string(data))
 	}
 	if status, _, _ := request(client, "GET", "/panel/api/offerings/"+created.PublicID, "", nil, nil); status != 200 {
 		t.Fatal("公开条目详情不可用", status)
@@ -239,6 +268,44 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if status, _, data := request(client, "POST", "/panel/api/offerings/"+created.PublicID+"/retirements", csrf, map[string]any{"version": created.Version + 1}, nil); status != 200 || !strings.Contains(string(data), `"enabled":false`) || !strings.Contains(string(data), `"is_default":false`) {
 		t.Fatal("停用公开条目失败", status, string(data))
 	}
+	if status, _, data := request(viewer, "DELETE", "/panel/api/offerings/"+created.PublicID, viewerCSRF, map[string]any{"version": created.Version + 2}, nil); status != 403 {
+		t.Fatal("只读账号删除了公开条目", status, string(data))
+	}
+	if status, _, _ := request(client, "DELETE", "/panel/api/offerings/"+created.PublicID, csrf, map[string]any{"version": created.Version + 1}, nil); status != 409 {
+		t.Fatal("过期版本删除条目没有被拒绝", status)
+	}
+	if status, _, data := request(client, "DELETE", "/panel/api/offerings/"+created.PublicID, csrf, map[string]any{"version": created.Version + 2}, nil); status != 200 || !bytes.Contains(data, []byte(`"deleted":true`)) {
+		t.Fatal("删除公开条目失败", status, string(data))
+	}
+	if status, _, _ := request(client, "GET", "/panel/api/offerings/"+created.PublicID, "", nil, nil); status != 404 {
+		t.Fatal("删除后的公开条目仍可从当前目录读取", status)
+	}
+	if status, _, data := request(client, "GET", "/panel/api/offerings/"+created.PublicID+"/price-versions", "", nil, nil); status != 200 || !bytes.Contains(data, []byte("panel-price-v1")) {
+		t.Fatal("删除后历史价格版本不可读取", status, string(data))
+	}
+	if status, _, data := request(client, "GET", "/panel/api/offerings", "", nil, nil); status != 200 || bytes.Contains(data, []byte(created.PublicID)) {
+		t.Fatal("删除后的条目仍出现在当前目录", status, string(data))
+	}
+	var deleted, enabled, isDefault bool
+	var priceVersions int
+	if err := f.pool.QueryRow(context.Background(), `SELECT deleted_at IS NOT NULL, enabled, is_default FROM tiku.offerings WHERE public_id=$1`, created.PublicID).Scan(&deleted, &enabled, &isDefault); err != nil || !deleted || enabled || isDefault {
+		t.Fatal("删除标记或公开状态未原子保存", deleted, enabled, isDefault, err)
+	}
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM tiku.offering_price_versions WHERE offering_id=(SELECT id FROM tiku.offerings WHERE public_id=$1)`, created.PublicID).Scan(&priceVersions); err != nil || priceVersions != 1 {
+		t.Fatal("删除公开条目影响了不可变价格版本", priceVersions, err)
+	}
+	var deletionAuditCount int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM tiku.panel_audit WHERE action='offering.delete' AND resource_id=$1 AND actor='maintainer'`, created.PublicID).Scan(&deletionAuditCount); err != nil || deletionAuditCount != 1 {
+		t.Fatal("公开条目删除缺少审计记录", deletionAuditCount, err)
+	}
+	republishedStatus, _, republishedData := request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil)
+	var republished struct {
+		PublicID string `json:"public_id"`
+	}
+	if republishedStatus != 201 || json.Unmarshal(republishedData, &republished) != nil || republished.PublicID == created.PublicID {
+		t.Fatal("删除条目后模型绑定没有释放", republishedStatus, string(republishedData))
+	}
+	created.PublicID = republished.PublicID
 	upstream := map[string]any{
 		"id": "panel-model", "display_name": "面板新增模型", "protocol": "openai-chat",
 		"base_url": f.llm.server.URL + "/v1", "upstream_model": "fake-answer", "api_key": "panel-secret-key",
@@ -272,27 +339,94 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if status, _, data := request(client, "GET", "/panel/api/models", "", nil, nil); status != 200 || strings.Contains(string(data), "panel-model") {
 		t.Fatal("删除后的模型仍在列表", status, string(data))
 	}
-	provider := map[string]any{"id": "panel-provider", "name": "测试提供商", "protocol": "openai-chat", "base_url": f.llm.server.URL + "/v1", "api_key": "provider-private-key"}
+	if status, _, data := request(client, "PATCH", "/panel/api/upstream-models/standard", csrf, map[string]any{
+		"display_name": "测试模型", "protocol": "openai-chat", "base_url": f.llm.server.URL + "/v1",
+		"upstream_model": "baseline-other", "context": 128000, "max_output_tokens": 512,
+	}, nil); status != 200 {
+		t.Fatal("隔离模型目录状态失败", status, string(data))
+	}
+	provider := map[string]any{"name": "测试提供商", "protocol": "openai-chat", "base_url": f.llm.server.URL + "/v1", "api_key": "provider-private-key"}
+	var createdProvider struct {
+		ID string `json:"id"`
+	}
+	temporary := map[string]any{"protocol": "openai-chat", "vendor": "fixture", "base_url": f.llm.server.URL + "/v1", "api_key": "temporary-discovery-secret"}
+	if status, _, data := request(client, "POST", "/panel/api/providers/discovery", csrf, temporary, nil); status != 200 || bytes.Contains(data, []byte("temporary-discovery-secret")) {
+		t.Fatal("临时密钥目录发现失败或泄漏密钥", status, string(data))
+	}
+	for _, test := range []struct {
+		client  *http.Client
+		csrf    string
+		headers map[string]string
+	}{
+		{client: client, csrf: csrf, headers: map[string]string{"Origin": "https://cross-site.invalid"}},
+		{client: viewer, csrf: viewerCSRF},
+		{client: client},
+	} {
+		if status, _, _ := request(test.client, "POST", "/panel/api/providers/discovery", test.csrf, temporary, test.headers); status != 403 {
+			t.Fatal("模型发现绕过 CSRF、来源或维护员权限", status)
+		}
+	}
+	if status, _, _ := request(viewer, "POST", "/panel/api/providers/panel-provider/models", viewerCSRF, map[string]any{}, nil); status != 403 {
+		t.Fatal("只读账号读取上游模型目录")
+	}
+	if status, _, _ := request(client, "POST", "/panel/api/providers/panel-provider/models", "", map[string]any{}, nil); status != 403 {
+		t.Fatal("模型目录请求没有校验 CSRF")
+	}
 	if status, _, _ := request(viewer, "POST", "/panel/api/providers", viewerCSRF, provider, nil); status != 403 {
 		t.Fatal("只读账号新增了提供商")
 	}
-	if status, _, data := request(client, "POST", "/panel/api/providers", csrf, provider, nil); status != 201 {
-		t.Fatal("新增提供商失败", status, string(data))
+	createdProviderStatus, _, createdProviderData := request(client, "POST", "/panel/api/providers", csrf, provider, nil)
+	if createdProviderStatus != 201 || json.Unmarshal(createdProviderData, &createdProvider) != nil || !strings.HasPrefix(createdProvider.ID, "provider-") {
+		t.Fatal("新增提供商未自动生成标识", createdProviderStatus, string(createdProviderData))
+	}
+	providerID := createdProvider.ID
+	if status, _, data := request(client, "POST", "/panel/api/providers/"+providerID+"/models", csrf, map[string]any{}, nil); status != 200 || bytes.Contains(data, []byte("provider-private-key")) {
+		t.Fatal("已保存提供商模型发现失败或泄漏密钥", status, string(data))
+	}
+	f.llm.setMode("discovery_rate_limited")
+	status, _, data = request(client, "POST", "/panel/api/providers/"+providerID+"/models", csrf, map[string]any{}, nil)
+	f.llm.setMode("")
+	if status != http.StatusTooManyRequests || !bytes.Contains(data, []byte(`"code":"upstream_rate_limited"`)) || bytes.Contains(data, []byte("provider-private-key")) || bytes.Contains(data, []byte("internal.example")) {
+		t.Fatal("上游限流未被稳定分类或错误响应泄漏内容", status, string(data))
+	}
+	var discoveryAudit string
+	if err := f.pool.QueryRow(context.Background(), `SELECT string_agg(detail::text, ' ') FROM tiku.panel_audit WHERE action IN ('provider.models.request','provider.models.result')`).Scan(&discoveryAudit); err != nil || strings.Contains(discoveryAudit, "temporary-discovery-secret") || strings.Contains(discoveryAudit, "provider-private-key") || !strings.Contains(discoveryAudit, "upstream_rate_limited") {
+		t.Fatal("模型发现审计缺少安全的结果事实", discoveryAudit, err)
 	}
 	for _, id := range []string{"shared-model-one", "shared-model-two"} {
-		model := map[string]any{"id": id, "provider_id": "panel-provider", "display_name": id, "upstream_model": "fake-answer"}
+		model := map[string]any{"id": id, "provider_id": providerID, "display_name": id, "upstream_model": "fake-answer"}
 		if status, _, data := request(client, "POST", "/panel/api/upstream-models", csrf, model, nil); status != 201 {
 			t.Fatal("新增关联模型失败", status, string(data))
 		}
 	}
+	configuredModels := func() map[string]string {
+		status, _, data := request(client, "POST", "/panel/api/providers/"+providerID+"/models", csrf, map[string]any{}, nil)
+		var result struct {
+			Items []struct {
+				ID                string `json:"id"`
+				ConfiguredModelID string `json:"configured_model_id"`
+			} `json:"items"`
+		}
+		if status != 200 || json.Unmarshal(data, &result) != nil {
+			t.Fatal("已配置模型目录读取失败", status, string(data))
+		}
+		configured := make(map[string]string, len(result.Items))
+		for _, item := range result.Items {
+			configured[item.ID] = item.ConfiguredModelID
+		}
+		return configured
+	}
+	if configuredModels()["fake-answer"] == "" {
+		t.Fatal("引用提供商的已配置模型没有在目录中标记")
+	}
 	if status, _, data := request(client, "GET", "/panel/api/providers", "", nil, nil); status != 200 || !bytes.Contains(data, []byte(`"model_count":2`)) || bytes.Contains(data, []byte("provider-private-key")) || bytes.Contains(data, []byte("api_key_file")) {
 		t.Fatal("提供商列表或密钥保护异常", status, string(data))
 	}
-	if status, _, _ := request(client, "DELETE", "/panel/api/providers/panel-provider", csrf, nil, nil); status != 409 {
+	if status, _, _ := request(client, "DELETE", "/panel/api/providers/"+providerID, csrf, nil, nil); status != 409 {
 		t.Fatal("仍被引用的提供商应拒绝删除")
 	}
 	retiredBody := offeringBody("1000000")
-	retiredBody["provider_ref"], retiredBody["enabled"], retiredBody["is_default"] = "shared-model-one", false, false
+	retiredBody["provider_ref"], retiredBody["enabled"], retiredBody["is_default"] = "shared-model-one", true, false
 	status, _, retiredData := request(client, "POST", "/panel/api/offerings", csrf, retiredBody, nil)
 	var retired struct {
 		PublicID string `json:"public_id"`
@@ -301,14 +435,24 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if status != 201 || json.Unmarshal(retiredData, &retired) != nil {
 		t.Fatal("创建已下架条目失败", status, string(retiredData))
 	}
-	if status, _, _ := request(client, "DELETE", "/panel/api/upstream-models/shared-model-one", csrf, nil, nil); status != 409 {
-		t.Fatal("已下架条目仍在引用时不得删除模型")
+	deleteStatus, _, deleteData := request(client, "DELETE", "/panel/api/upstream-models/shared-model-one", csrf, nil, nil)
+	var deletion struct {
+		RemovedOfferings int `json:"removed_offerings"`
 	}
-	retiredBody["provider_ref"], retiredBody["version"] = "standard", retired.Version
-	if status, _, data := request(client, "PATCH", "/panel/api/offerings/"+retired.PublicID, csrf, retiredBody, nil); status != 200 {
-		t.Fatal("重新关联公开条目失败", status, string(data))
+	if deleteStatus != 200 || json.Unmarshal(deleteData, &deletion) != nil || deletion.RemovedOfferings != 1 {
+		t.Fatal("删除模型应移除关联条目", deleteStatus, string(deleteData))
 	}
-	for _, id := range []string{"shared-model-one", "shared-model-two"} {
+	status, _, retiredData = request(client, "GET", "/panel/api/offerings/"+retired.PublicID, "", nil, nil)
+	if status != 404 {
+		t.Fatal("删除模型后关联条目仍在当前目录", status, string(retiredData))
+	}
+	if status, _, retiredData = request(client, "GET", "/panel/api/offerings/"+retired.PublicID+"/price-versions", "", nil, nil); status != 200 || !bytes.Contains(retiredData, []byte("panel-price-v1")) {
+		t.Fatal("删除模型影响了关联条目的价格历史", status, string(retiredData))
+	}
+	if configured := configuredModels(); configured["fake-answer"] == "" {
+		t.Fatal("删除一个引用模型错误地抹除了仍存在模型的目录状态", configured)
+	}
+	for _, id := range []string{"shared-model-two"} {
 		queryID := "provider-query-" + id
 		input := v2Request("提供商模型题", "A. 甲", "always_llm", queryID, queryID, nil)
 		input.ModelOfferingID = id
@@ -319,11 +463,16 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 			t.Fatal("删除关联模型失败", status, string(data))
 		}
 	}
-	if status, _, data := request(client, "DELETE", "/panel/api/providers/panel-provider", csrf, nil, nil); status != 200 {
+	if configured := configuredModels(); configured["fake-answer"] != "" {
+		t.Fatal("删除最后一个引用模型后目录仍标记为已配置", configured)
+	}
+	if status, _, data := request(client, "DELETE", "/panel/api/providers/"+providerID, csrf, nil, nil); status != 200 {
 		t.Fatal("删除空提供商失败", status, string(data))
 	}
 	// 新默认项会改变原默认项的版本，避免过期表单覆盖并发修改。
-	firstStatus, _, firstData := request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil)
+	anotherOfferingBody := offeringBody("1000000")
+	anotherOfferingBody["provider_ref"] = "caption-model"
+	firstStatus, _, firstData := request(client, "POST", "/panel/api/offerings", csrf, anotherOfferingBody, nil)
 	if firstStatus != 201 {
 		t.Fatal("新增默认条目失败", firstStatus, string(firstData))
 	}
@@ -334,10 +483,23 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if err := json.Unmarshal(firstData, &first); err != nil {
 		t.Fatal(err)
 	}
-	if status, _, data := request(client, "POST", "/panel/api/offerings", csrf, offeringBody("1000000"), nil); status != 201 {
+	var currentStandard struct {
+		Version int64 `json:"version"`
+	}
+	if status, _, data := request(client, "GET", "/panel/api/offerings/"+created.PublicID, "", nil, nil); status != 200 || json.Unmarshal(data, &currentStandard) != nil {
+		t.Fatal("读取当前默认条目版本失败", status, string(data))
+	}
+	conflictingUpdate := offeringBody("1000000")
+	conflictingUpdate["provider_ref"], conflictingUpdate["version"] = "caption-model", currentStandard.Version
+	if status, _, data := request(client, "PATCH", "/panel/api/offerings/"+created.PublicID, csrf, conflictingUpdate, nil); status != http.StatusConflict || !bytes.Contains(data, []byte(`"code":"model_already_published"`)) {
+		t.Fatal("编辑公开条目时允许关联到已有条目的模型", status, string(data))
+	}
+	standardUpdate := offeringBody("1000000")
+	standardUpdate["version"] = currentStandard.Version
+	if status, _, data := request(client, "PATCH", "/panel/api/offerings/"+created.PublicID, csrf, standardUpdate, nil); status != 200 {
 		t.Fatal("切换默认条目失败", status, string(data))
 	}
-	stale := offeringBody("1000000")
+	stale := anotherOfferingBody
 	stale["version"] = first.Version
 	if status, _, _ := request(client, "PATCH", "/panel/api/offerings/"+first.PublicID, csrf, stale, nil); status != 409 {
 		t.Fatal("旧默认条目的过期版本没有被拒绝")
@@ -358,10 +520,115 @@ func TestPostgresPanelAuthenticationPermissionsAndAudit(t *testing.T) {
 	if status, _, data := request(client, "GET", "/panel/api/providers", "", nil, nil); status != 200 || bytes.Contains(data, []byte("blocked-provider")) {
 		t.Fatal("审计失败后提供商配置仍被修改", status, string(data))
 	}
+	settingsPayload := map[string]any{
+		"caption_model_id": "caption-model", "concurrency": 3, "timeout_seconds": 10, "max_output_tokens": 320,
+		"cache_ttl_days": 5, "cache_max_ttl_days": 20, "shared_cache_enabled": true,
+		"pricing_catalog_ttl_hours": 12, "pricing_exchange_ttl_hours": 36,
+	}
+	if status, _, _ := request(viewer, "PATCH", "/panel/api/settings", viewerCSRF, settingsPayload, nil); status != 403 {
+		t.Fatal("只读账号修改了服务设置")
+	}
+	if status, _, _ := request(viewer, "POST", "/panel/api/settings/pricing-cache/refresh", viewerCSRF, map[string]any{}, nil); status != 403 {
+		t.Fatal("只读账号刷新了价格缓存")
+	}
+	invalidSettings := map[string]any{}
+	for key, value := range settingsPayload {
+		invalidSettings[key] = value
+	}
+	invalidSettings["concurrency"] = 0
+	if status, _, data := request(client, "PATCH", "/panel/api/settings", csrf, invalidSettings, nil); status != 422 {
+		t.Fatal("无效服务设置没有被拒绝", status, string(data))
+	}
+	status, _, settingsData := request(client, "PATCH", "/panel/api/settings", csrf, settingsPayload, nil)
+	if status != 200 || !bytes.Contains(settingsData, []byte(`"pricing_catalog_ttl_hours":12`)) ||
+		!bytes.Contains(settingsData, []byte(`"restart_required":true`)) || !bytes.Contains(settingsData, []byte(`"catalog_ttl_hours":12`)) {
+		t.Fatal("服务设置保存失败", status, string(settingsData))
+	}
+	loaded, err := config.Load(f.cfg.SourcePath)
+	if err != nil || loaded.Limits.Concurrency != 3 || loaded.Limits.TimeoutSeconds != 10 || loaded.Limits.MaxOutputTokens != 320 ||
+		loaded.Cache.TTLDays != 5 || loaded.Cache.MaxTTLDays != 20 || !loaded.Cache.SharedEnabled || loaded.CaptionModelID != "caption-model" ||
+		loaded.PricingCache.CatalogTTLHours != 12 || loaded.PricingCache.ExchangeTTLHours != 36 || len(loaded.Models) != 2 {
+		t.Fatalf("服务设置没有完整持久化：%+v/%v", loaded, err)
+	}
+	var settingsAudit int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM tiku.panel_audit WHERE action='settings.update' AND actor='maintainer'`).Scan(&settingsAudit); err != nil || settingsAudit != 1 {
+		t.Fatal("服务设置缺少审计", settingsAudit, err)
+	}
+	status, _, settingsData = request(client, "GET", "/panel/api/settings", "", nil, nil)
+	if status != 200 || !bytes.Contains(settingsData, []byte(`"caption_model_id":"caption-model"`)) ||
+		!bytes.Contains(settingsData, []byte(`"pricing_cache"`)) || !bytes.Contains(settingsData, []byte(`"service"`)) {
+		t.Fatal("服务设置读取不完整", status, string(settingsData))
+	}
 	if status, _, _ := request(client, "POST", "/panel/api/logout", csrf, map[string]any{}, nil); status != 200 {
 		t.Fatal("无法退出维护会话")
 	}
 	if status, _, _ := request(client, "GET", "/panel/api/session", "", nil, nil); status != 401 {
 		t.Fatal("退出后会话仍可用")
+	}
+
+	autoWeb := httptest.NewUnstartedServer(nil)
+	autoOrigin := "http://" + autoWeb.Listener.Addr().String()
+	autoCfg := *f.cfg
+	autoCfg.Panel = config.Panel{Enabled: true, Origin: autoOrigin, LocalAutoLogin: true, Users: f.cfg.Panel.Users}
+	autoHandler, err := panel.New(&autoCfg, f.svc, f.store, f.registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	autoWeb.Config.Handler = panel.Mount(f.handler, autoHandler)
+	autoWeb.Start()
+	t.Cleanup(autoWeb.Close)
+	autoClient := autoWeb.Client()
+	sessionResponse, err := autoClient.Get(autoOrigin + "/panel/api/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var localSession struct {
+		Username  string `json:"username"`
+		Role      string `json:"role"`
+		CSRF      string `json:"csrf_token"`
+		AutoLogin bool   `json:"local_auto_login"`
+	}
+	sessionBody, err := io.ReadAll(sessionResponse.Body)
+	sessionResponse.Body.Close()
+	if err != nil || sessionResponse.StatusCode != 200 || json.Unmarshal(sessionBody, &localSession) != nil ||
+		localSession.Username != "maintainer" || localSession.Role != "maintainer" || !localSession.AutoLogin || localSession.CSRF == "" {
+		t.Fatal("回环本地预览没有自动建立维护员会话", sessionResponse.StatusCode, string(sessionBody), err)
+	}
+	cookies := sessionResponse.Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "tiku_panel_session" || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatal("本地自动会话 Cookie 缺少保护", cookies)
+	}
+	var localLogins int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM tiku.panel_audit WHERE action='session.local_login'`).Scan(&localLogins); err != nil || localLogins != 1 {
+		t.Fatal("本地自动登录缺少审计", localLogins, err)
+	}
+	writeRequest, err := http.NewRequest("PATCH", autoOrigin+"/panel/api/models/standard", strings.NewReader(`{"enabled":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRequest.Header.Set("Origin", autoOrigin)
+	writeRequest.Header.Set("X-CSRF-Token", localSession.CSRF)
+	writeRequest.Header.Set("Content-Type", "application/json")
+	writeRequest.AddCookie(cookies[0])
+	writeResponse, err := autoClient.Do(writeRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeResponse.Body.Close()
+	if writeResponse.StatusCode != 200 {
+		t.Fatal("本地自动会话没有维护员写权限", writeResponse.StatusCode)
+	}
+	evil, err := http.NewRequest("GET", autoOrigin+"/panel/api/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evil.Host = "evil.example"
+	evilResponse, err := autoClient.Do(evil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evilResponse.Body.Close()
+	if evilResponse.StatusCode != 401 {
+		t.Fatal("非回环 Host 不应触发本地自动登录", evilResponse.StatusCode)
 	}
 }

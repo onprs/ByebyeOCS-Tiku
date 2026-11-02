@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -29,18 +30,21 @@ import (
 var assets embed.FS
 
 type Server struct {
-	cfg       *config.Config
-	svc       *answer.Service
-	store     *store.Store
-	catalog   *catalog.Service
-	registry  *models.Registry
-	editor    *modelconfig.Editor
-	auth      *authentication
-	secure    bool
-	catalogMu sync.Mutex
+	cfg              *config.Config
+	svc              *answer.Service
+	store            *store.Store
+	catalog          *catalog.Service
+	registry         *models.Registry
+	editor           *modelconfig.Editor
+	auth             *authentication
+	secure           bool
+	catalogMu        sync.Mutex
+	settingsMu       sync.Mutex
+	serviceSettings  modelconfig.ServiceSettings
+	pricingReference *pricingReferenceService
 }
 
-func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *models.Registry) (http.Handler, error) {
+func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *models.Registry) (*Handler, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -49,24 +53,36 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *mod
 		return nil, err
 	}
 	editor, _ := modelconfig.NewEditor(cfg, registry)
+	cacheDir := ""
+	if cfg.SourcePath != "" {
+		cacheDir = filepath.Join(filepath.Dir(cfg.SourcePath), "cache")
+	}
 	server := &Server{cfg: cfg, svc: svc, store: st, catalog: catalog.NewWithRegistry(cfg, st.Pool(), registry),
-		registry: registry, editor: editor, auth: auth, secure: strings.HasPrefix(cfg.Panel.Origin, "https://")}
+		registry: registry, editor: editor, auth: auth, secure: strings.HasPrefix(cfg.Panel.Origin, "https://"),
+		serviceSettings: newServiceSettings(cfg)}
+	settings := server.serviceSettings
+	server.pricingReference = newPricingReferenceServiceWithCache(cacheDir,
+		time.Duration(settings.PricingCatalogTTLHours)*time.Hour, time.Duration(settings.PricingExchangeTTLHours)*time.Hour)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /panel/api/login", server.login)
-	mux.HandleFunc("GET /panel/api/session", server.protect(false, server.session))
+	mux.HandleFunc("GET /panel/api/session", server.sessionBootstrap)
 	mux.HandleFunc("POST /panel/api/logout", server.protect(false, server.logout))
 	mux.HandleFunc("GET /panel/api/overview", server.protect(false, server.overview))
 	mux.HandleFunc("GET /panel/api/models", server.protect(false, server.models))
 	mux.HandleFunc("PATCH /panel/api/models/{id}", server.protect(true, server.setModel))
 	mux.HandleFunc("POST /panel/api/models/{id}/tests", server.protect(true, server.testModel))
 	mux.HandleFunc("GET /panel/api/offerings", server.protect(false, server.offerings))
+	mux.HandleFunc("GET /panel/api/model-pricing", server.protect(false, server.modelPricingReference))
 	mux.HandleFunc("GET /panel/api/offerings/{id}", server.protect(false, server.offering))
 	mux.HandleFunc("POST /panel/api/offerings", server.protect(true, server.createOffering))
 	mux.HandleFunc("PATCH /panel/api/offerings/{id}", server.protect(true, server.updateOffering))
+	mux.HandleFunc("DELETE /panel/api/offerings/{id}", server.protect(true, server.deleteOffering))
 	mux.HandleFunc("GET /panel/api/offerings/{id}/price-versions", server.protect(false, server.priceVersions))
 	mux.HandleFunc("POST /panel/api/offerings/{id}/tests", server.protect(true, server.testOffering))
 	mux.HandleFunc("POST /panel/api/offerings/{id}/retirements", server.protect(true, server.retireOffering))
 	mux.HandleFunc("GET /panel/api/providers", server.protect(false, server.providers))
+	mux.HandleFunc("POST /panel/api/providers/discovery", server.protect(true, server.testProvider))
+	mux.HandleFunc("POST /panel/api/providers/{id}/models", server.protect(true, server.provideModels))
 	mux.HandleFunc("POST /panel/api/providers", server.protect(true, server.createProvider))
 	mux.HandleFunc("PATCH /panel/api/providers/{id}", server.protect(true, server.updateProvider))
 	mux.HandleFunc("DELETE /panel/api/providers/{id}", server.protect(true, server.deleteProvider))
@@ -78,6 +94,8 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *mod
 	mux.HandleFunc("GET /panel/api/cache", server.protect(false, server.cache))
 	mux.HandleFunc("POST /panel/api/cache/{id}/invalidations", server.protect(true, server.invalidate))
 	mux.HandleFunc("GET /panel/api/settings", server.protect(false, server.settings))
+	mux.HandleFunc("PATCH /panel/api/settings", server.protect(true, server.updateSettings))
+	mux.HandleFunc("POST /panel/api/settings/pricing-cache/refresh", server.protect(true, server.refreshPricingCache))
 	mux.HandleFunc("GET /panel/api/audit", server.protect(false, server.audit))
 	mux.HandleFunc("/panel/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "not_found", "页面或操作不存在") })
 	files, err := fs.Sub(assets, "assets")
@@ -92,7 +110,7 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *mod
 		}
 		static.ServeHTTP(w, r)
 	}))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return &Handler{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -108,7 +126,10 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *mod
 				return
 			}
 			deadline := 10 * time.Second
-			if strings.HasSuffix(r.URL.Path, "/tests") {
+			if strings.HasSuffix(r.URL.Path, "/tests") || strings.HasSuffix(r.URL.Path, "/discovery") ||
+				strings.HasPrefix(r.URL.Path, "/panel/api/model-pricing") || strings.HasPrefix(r.URL.Path, "/panel/api/settings") ||
+				(strings.HasPrefix(r.URL.Path, "/panel/api/providers/") && strings.HasSuffix(r.URL.Path, "/models")) ||
+				(strings.HasPrefix(r.URL.Path, "/panel/api/offerings") && r.Method != http.MethodGet) {
 				deadline = 40 * time.Second
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), deadline)
@@ -116,7 +137,17 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, registry *mod
 			r = r.WithContext(ctx)
 		}
 		mux.ServeHTTP(w, r)
-	}), nil
+	}), server: server}, nil
+}
+
+// Handler 是题库面板入口，并提供服务启动后的价格来源预热。
+type Handler struct {
+	http.Handler
+	server *Server
+}
+
+func (h *Handler) WarmPricingReference(ctx context.Context) {
+	h.server.pricingReference.Warm(ctx)
 }
 
 // Mount 将维护面板挂载到独立路径，业务接口仍走原有服务令牌保护。
@@ -220,8 +251,30 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	setCookie(w, token, s.secure, 8*60*60)
 	jsonResponse(w, 200, current)
 }
-func (s *Server) session(w http.ResponseWriter, r *http.Request, current session) {
-	jsonResponse(w, 200, current)
+
+// sessionBootstrap 读取现有会话；仅在显式启用且来源、地址均为回环时自动建立本地维护员会话。
+func (s *Server) sessionBootstrap(w http.ResponseWriter, r *http.Request) {
+	current, ok := s.auth.current(r)
+	if ok {
+		jsonResponse(w, 200, current)
+		return
+	}
+	if !s.cfg.Panel.LocalAutoLogin || !loopbackRequest(r) || s.auth.localUser == "" {
+		fail(w, 401, "unauthorized", "请先登录维护面板")
+		return
+	}
+	if err := s.store.PanelRecordAudit(r.Context(), s.auth.localUser, "session.local_login", "", map[string]any{"local": true}); err != nil {
+		databaseFailure(w, err)
+		return
+	}
+	token, created, err := s.auth.createLocal()
+	if err != nil {
+		fail(w, 429, "session_limit", "会话数量已达上限，请稍后重试")
+		return
+	}
+	s.auth.remove(r)
+	setCookie(w, token, s.secure, 8*60*60)
+	jsonResponse(w, 200, created)
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, current session) {
 	s.auth.remove(r)
@@ -427,26 +480,6 @@ func (s *Server) invalidate(w http.ResponseWriter, r *http.Request, current sess
 		return
 	}
 	jsonResponse(w, 200, map[string]any{"entry_id": id, "invalidated": changed})
-}
-func (s *Server) settings(w http.ResponseWriter, r *http.Request, current session) {
-	offerings, err := s.catalog.List(r.Context())
-	if err != nil {
-		databaseFailure(w, err)
-		return
-	}
-	enabled, defaultOffering := 0, ""
-	for _, item := range offerings {
-		if item.Enabled && item.Health != catalog.HealthUnavailable {
-			enabled++
-		}
-		if item.Default {
-			defaultOffering = item.PublicID
-		}
-	}
-	jsonResponse(w, 200, map[string]any{"cache_ttl_days": s.cfg.Cache.TTLDays, "cache_max_ttl_days": s.cfg.Cache.MaxTTLDays, "shared_cache_enabled": s.cfg.Cache.SharedEnabled,
-		"max_output_tokens": s.cfg.Limits.MaxOutputTokens, "concurrency": s.cfg.Limits.Concurrency, "timeout_seconds": s.cfg.Limits.TimeoutSeconds,
-		"model_count": len(s.registry.Models()), "offering_count": len(offerings), "published_offering_count": enabled,
-		"default_offering_id": defaultOffering, "caption_model_id": s.registry.CaptionID()})
 }
 func (s *Server) audit(w http.ResponseWriter, r *http.Request, current session) {
 	filter, ok := listFilter(w, r, "")

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -44,13 +45,25 @@ func (m *Micros) UnmarshalJSON(data []byte) error {
 }
 
 // Pricing 是一个不可变的价格版本。费率单位为微元/百万 token。
+type PricingReference struct {
+	Source       string `json:"source"`
+	SourceURL    string `json:"source_url"`
+	Exchange     string `json:"exchange_source"`
+	ExchangeURL  string `json:"exchange_url"`
+	ExchangeDate string `json:"exchange_date"`
+	ExchangeRate string `json:"exchange_rate"`
+}
+
 type Pricing struct {
-	Version                      string `json:"version"`
-	InputMicrosPerMillionTokens  Micros `json:"input_micros_per_million_tokens"`
-	OutputMicrosPerMillionTokens Micros `json:"output_micros_per_million_tokens"`
-	MicrosPerMinor               Micros `json:"micros_per_minor"`
-	Rounding                     string `json:"rounding"`
-	Rule                         string `json:"rule"`
+	Version                          string            `json:"version"`
+	InputMicrosPerMillionTokens      Micros            `json:"input_micros_per_million_tokens"`
+	OutputMicrosPerMillionTokens     Micros            `json:"output_micros_per_million_tokens"`
+	CacheReadMicrosPerMillionTokens  *Micros           `json:"cache_read_micros_per_million_tokens,omitempty"`
+	CacheWriteMicrosPerMillionTokens *Micros           `json:"cache_write_micros_per_million_tokens,omitempty"`
+	Reference                        *PricingReference `json:"reference,omitempty"`
+	MicrosPerMinor                   Micros            `json:"micros_per_minor"`
+	Rounding                         string            `json:"rounding"`
+	Rule                             string            `json:"rule"`
 }
 
 func (p *Pricing) Validate() error {
@@ -69,14 +82,29 @@ func (p *Pricing) Validate() error {
 	if p.MicrosPerMinor != 10000 {
 		return invalid("人民币每分固定为10000微元")
 	}
-	if p.InputMicrosPerMillionTokens < 0 || p.OutputMicrosPerMillionTokens < 0 {
+	if p.InputMicrosPerMillionTokens < 0 || p.OutputMicrosPerMillionTokens < 0 ||
+		p.CacheReadMicrosPerMillionTokens != nil && *p.CacheReadMicrosPerMillionTokens < 0 ||
+		p.CacheWriteMicrosPerMillionTokens != nil && *p.CacheWriteMicrosPerMillionTokens < 0 {
 		return invalid("token 费率不能为负")
+	}
+	if ref := p.Reference; ref != nil {
+		rate, ok := new(big.Rat).SetString(ref.ExchangeRate)
+		if ref.Source != "models.dev" || ref.SourceURL != "https://models.dev/api.json" ||
+			ref.Exchange != "Frankfurter" || ref.ExchangeURL != "https://api.frankfurter.dev/v2/rate/usd/cny" ||
+			!ok || rate.Sign() <= 0 {
+			return invalid("价格参考来源或汇率无效")
+		}
+		if _, err := time.Parse("2006-01-02", ref.ExchangeDate); err != nil {
+			return invalid("价格参考汇率日期无效")
+		}
 	}
 	return nil
 }
 
 func (p *Pricing) Free() bool {
-	return p != nil && p.InputMicrosPerMillionTokens == 0 && p.OutputMicrosPerMillionTokens == 0
+	return p != nil && p.InputMicrosPerMillionTokens == 0 && p.OutputMicrosPerMillionTokens == 0 &&
+		(p.CacheReadMicrosPerMillionTokens == nil || *p.CacheReadMicrosPerMillionTokens == 0) &&
+		(p.CacheWriteMicrosPerMillionTokens == nil || *p.CacheWriteMicrosPerMillionTokens == 0)
 }
 
 // CachePolicy 控制精确缓存的可用范围与期限；期限不得超过题库服务上限。
@@ -268,9 +296,10 @@ func DecodeCachePolicy(data []byte) (CachePolicy, error) {
 
 // 存储层向面板暴露的确定性错误；面板据此映射 409/404，不转发数据库文本。
 var (
-	ErrVersionConflict      = errors.New("公开条目已被其他操作更新，请刷新后重试")
-	ErrPriceVersionConflict = errors.New("此价格版本已有不同费率，请发布新版本")
-	ErrNotFound             = errors.New("公开条目不存在")
+	ErrVersionConflict       = errors.New("公开条目已被其他操作更新，请刷新后重试")
+	ErrPriceVersionConflict  = errors.New("此价格版本已有不同费率，请发布新版本")
+	ErrModelAlreadyPublished = errors.New("该上游模型已经有关联的公开条目，请编辑现有条目")
+	ErrNotFound              = errors.New("公开条目不存在")
 )
 
 func newUUID() string {

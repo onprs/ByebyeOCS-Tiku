@@ -22,17 +22,19 @@ import (
 )
 
 const (
-	DefaultDatabaseMaxConnections = 4
-	DefaultMaxRequestBytes        = 32 << 20
-	DefaultMaxImages              = 8
-	DefaultMaxImageBytes          = 5 << 20
-	DefaultMaxImagePixels         = 16000000
-	DefaultMaxOutputTokens        = 2048
-	DefaultConcurrency            = 2
-	DefaultTimeout                = 90 * time.Second
-	DefaultCacheTTLDays           = 7
-	DefaultMaxCacheTTLDays        = 30
-	DefaultIdempotencyTTL         = 168 * time.Hour
+	DefaultDatabaseMaxConnections  = 4
+	DefaultMaxRequestBytes         = 32 << 20
+	DefaultMaxImages               = 8
+	DefaultMaxImageBytes           = 5 << 20
+	DefaultMaxImagePixels          = 16000000
+	DefaultMaxOutputTokens         = 2048
+	DefaultConcurrency             = 2
+	DefaultTimeout                 = 90 * time.Second
+	DefaultCacheTTLDays            = 7
+	DefaultMaxCacheTTLDays         = 30
+	DefaultPricingCatalogTTLHours  = 24
+	DefaultPricingExchangeTTLHours = 24
+	DefaultIdempotencyTTL          = 168 * time.Hour
 )
 
 var modelIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
@@ -88,30 +90,39 @@ type PanelUser struct {
 	Role             string `json:"role"`
 }
 
+// PricingCache 控制模型参考价目录与汇率的本地缓存期限；缓存文件位于配置目录下的 cache/。
+type PricingCache struct {
+	CatalogTTLHours  int `json:"catalog_ttl_hours"`
+	ExchangeTTLHours int `json:"exchange_ttl_hours"`
+}
+
 type Panel struct {
 	Enabled bool        `json:"enabled"`
 	Origin  string      `json:"origin"`
 	Users   []PanelUser `json:"users"`
+	// LocalAutoLogin 仅限回环入口的本地维护预览，免去每次重复登录；公开入口必须关闭。
+	LocalAutoLogin bool `json:"local_auto_login,omitempty"`
 }
 
 type Config struct {
 	// SourcePath 是实际读取的配置文件路径，仅供维护面板原子回写；不参与 JSON。
-	SourcePath             string     `json:"-"`
-	Listen                 string     `json:"listen"`
-	DatabaseMaxConnections int32      `json:"database_max_connections"`
-	DatabaseDSNFile        string     `json:"database_dsn_file"`
-	ServiceTokenFile       string     `json:"service_token_file"`
-	UpstreamCAFile         string     `json:"upstream_ca_file"`
-	DefaultModelID         string     `json:"default_model_id"`
-	CaptionModelID         string     `json:"caption_model_id"`
-	AllowLoopbackUpstreams bool       `json:"allow_loopback_upstreams"`
-	PromptVersion          string     `json:"prompt_version"`
-	NormalizationVersion   string     `json:"normalization_version"`
-	Limits                 Limits     `json:"limits"`
-	Cache                  Cache      `json:"cache"`
-	Providers              []Provider `json:"providers,omitempty"`
-	Models                 []Model    `json:"models"`
-	Panel                  Panel      `json:"panel"`
+	SourcePath             string       `json:"-"`
+	Listen                 string       `json:"listen"`
+	DatabaseMaxConnections int32        `json:"database_max_connections"`
+	DatabaseDSNFile        string       `json:"database_dsn_file"`
+	ServiceTokenFile       string       `json:"service_token_file"`
+	UpstreamCAFile         string       `json:"upstream_ca_file"`
+	DefaultModelID         string       `json:"default_model_id"`
+	CaptionModelID         string       `json:"caption_model_id"`
+	AllowLoopbackUpstreams bool         `json:"allow_loopback_upstreams"`
+	PromptVersion          string       `json:"prompt_version"`
+	NormalizationVersion   string       `json:"normalization_version"`
+	Limits                 Limits       `json:"limits"`
+	Cache                  Cache        `json:"cache"`
+	PricingCache           PricingCache `json:"pricing_cache"`
+	Providers              []Provider   `json:"providers,omitempty"`
+	Models                 []Model      `json:"models"`
+	Panel                  Panel        `json:"panel"`
 }
 
 func applyDefaults(c *Config) {
@@ -147,6 +158,12 @@ func applyDefaults(c *Config) {
 	}
 	if c.Cache.MaxTTLDays <= 0 {
 		c.Cache.MaxTTLDays = DefaultMaxCacheTTLDays
+	}
+	if c.PricingCache.CatalogTTLHours <= 0 {
+		c.PricingCache.CatalogTTLHours = DefaultPricingCatalogTTLHours
+	}
+	if c.PricingCache.ExchangeTTLHours <= 0 {
+		c.PricingCache.ExchangeTTLHours = DefaultPricingExchangeTTLHours
 	}
 	if c.PromptVersion == "" {
 		c.PromptVersion = "fork-p1"
@@ -241,11 +258,15 @@ func (c *Config) Validate() error {
 	if c.Limits.Concurrency < 1 || c.Limits.Concurrency > 16 {
 		return errors.New("concurrency 必须在 1 到 16 之间")
 	}
-	if c.Limits.TimeoutSeconds < 5 || c.Limits.TimeoutSeconds > 300 {
-		return errors.New("timeout_seconds 必须在 5 到 300 之间")
+	if c.Limits.TimeoutSeconds < 5 || c.Limits.TimeoutSeconds > 900 {
+		return errors.New("timeout_seconds 必须在 5 到 900 之间")
 	}
 	if c.Cache.TTLDays < 1 || c.Cache.TTLDays > c.Cache.MaxTTLDays || c.Cache.MaxTTLDays > 365 {
 		return errors.New("cache.ttl_days 必须不高于 cache.max_ttl_days，且上限不超过 365 天")
+	}
+	if (c.PricingCache.CatalogTTLHours != 0 && (c.PricingCache.CatalogTTLHours < 1 || c.PricingCache.CatalogTTLHours > 720)) ||
+		(c.PricingCache.ExchangeTTLHours != 0 && (c.PricingCache.ExchangeTTLHours < 1 || c.PricingCache.ExchangeTTLHours > 720)) {
+		return errors.New("pricing_cache 缓存期限必须在 1 到 720 小时之间")
 	}
 	if c.Panel.Enabled {
 		origin, err := url.Parse(c.Panel.Origin)
@@ -256,6 +277,12 @@ func (c *Config) Validate() error {
 			ip := net.ParseIP(origin.Hostname())
 			if origin.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
 				return errors.New("维护面板的非回环入口必须使用 HTTPS")
+			}
+		}
+		if c.Panel.LocalAutoLogin {
+			ip := net.ParseIP(origin.Hostname())
+			if origin.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+				return errors.New("panel.local_auto_login 只能用于回环入口")
 			}
 		}
 		if len(c.Panel.Users) < 1 || len(c.Panel.Users) > 16 {
@@ -332,6 +359,15 @@ func (c *Config) Validate() error {
 		return errors.New("caption_model_id 未在 models 中定义")
 	}
 	return nil
+}
+
+// ValidateProviderConnection 校验维护面板临时测试使用的连接，与持久配置采用相同约束。
+func ValidateProviderConnection(protocol, baseURL string, hasKey, allowLoopback bool) error {
+	keyFile := ""
+	if hasKey {
+		keyFile = "configured"
+	}
+	return validateConnection(protocol, baseURL, keyFile, allowLoopback)
 }
 
 func validateConnection(protocol, baseURL, keyFile string, allowLoopback bool) error {

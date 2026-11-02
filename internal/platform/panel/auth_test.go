@@ -66,6 +66,61 @@ func TestMaintenanceSessionsExpireAndLoginAttemptsAreBounded(t *testing.T) {
 	}
 }
 
+func TestLocalAutoLoginCreatesMaintainerSessionOnly(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("Isolated-Panel-Password!"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "panel.hash")
+	if err := os.WriteFile(path, hash, 0600); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := newAuthentication(config.Panel{Enabled: true, Users: []config.PanelUser{
+		{Username: "reader", Role: "viewer", PasswordHashFile: path},
+		{Username: "maintenance", Role: "maintainer", PasswordHashFile: path},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, current, err := auth.createLocal()
+	if err != nil || token == "" || !current.AutoLogin || current.Role != "maintainer" || current.Username != "maintenance" || current.CSRF == "" {
+		t.Fatalf("本地自动登录没有建立维护员会话：%+v/%v", current, err)
+	}
+	request := httptest.NewRequest("GET", "http://127.0.0.1/panel/api/session", nil)
+	request.Header.Set("Cookie", sessionCookie+"="+token)
+	if stored, ok := auth.current(request); !ok || !stored.AutoLogin || stored.Role != "maintainer" {
+		t.Fatal("本地自动会话不可用或权限不足")
+	}
+	viewerOnly, err := newAuthentication(config.Panel{Enabled: true, Users: []config.PanelUser{{Username: "reader", Role: "viewer", PasswordHashFile: path}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := viewerOnly.createLocal(); err == nil {
+		t.Fatal("没有维护员账号时仍建立了本地会话")
+	}
+}
+
+func TestLoopbackRequestRejectsNonLoopbackSourceOrHost(t *testing.T) {
+	for _, test := range []struct {
+		remote, host string
+		want         bool
+	}{
+		{"127.0.0.1:1234", "127.0.0.1:5193", true},
+		{"[::1]:1234", "[::1]:5193", true},
+		{"127.0.0.1:1234", "localhost:5193", true},
+		{"192.168.1.5:1234", "127.0.0.1:5193", false},
+		{"127.0.0.1:1234", "evil.example", false},
+		{"127.0.0.1:1234", "", false},
+	} {
+		request := httptest.NewRequest("GET", "http://127.0.0.1/panel/api/session", nil)
+		request.RemoteAddr = test.remote
+		request.Host = test.host
+		if got := loopbackRequest(request); got != test.want {
+			t.Fatalf("%s / %s 回环判定错误：got=%v want=%v", test.remote, test.host, got, test.want)
+		}
+	}
+}
+
 func TestMaintenanceCredentialFilesRequireHashesAndPrivatePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "panel.hash")
 	cfg := config.Panel{Enabled: true, Users: []config.PanelUser{{Username: "maintenance", Role: "maintainer", PasswordHashFile: path}}}

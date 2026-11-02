@@ -47,6 +47,7 @@ func New(cfg *config.Config, svc *answer.Service, st *store.Store, serviceToken 
 	mux.HandleFunc("POST /internal/v1/models/{id}/tests", s.internalModelTest)
 	mux.HandleFunc("POST /internal/v1/cache/invalidations", s.internalCacheInvalidate)
 	mux.HandleFunc("GET /internal/v1/usage", s.internalUsage)
+	mux.HandleFunc("GET /internal/v1/requests/{key}", s.internalRequestStatus)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -225,13 +226,31 @@ func (s *Server) answerV2(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request, s.cfg.Limits.MaxRequestBytes, false) {
 		return
 	}
-	response, err := s.svc.Answer(r.Context(), request, idempotencyKey)
-	if err != nil {
-		e := answer.AsError(err)
-		writeErrorV2(w, e.HTTPStatus, e.Code, e.Message, request.RequestID)
+	// 题库拥有调用生命周期：即使调用方断开连接，也继续完成并落库结果，
+	// 后续同幂等键请求直接读取已保存的响应，而不是把断连当成“结果未知”。
+	workCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.cfg.Timeout()+15*time.Second)
+	type outcome struct {
+		response *answer.Response
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		response, err := s.svc.Answer(workCtx, request, idempotencyKey)
+		done <- outcome{response: response, err: err}
+		cancel()
+	}()
+	select {
+	case result := <-done:
+		if result.err != nil {
+			e := answer.AsError(result.err)
+			writeErrorV2(w, e.HTTPStatus, e.Code, e.Message, request.RequestID)
+			return
+		}
+		writeJSON(w, http.StatusOK, result.response)
+	case <-r.Context().Done():
+		// 调用方已经离开：不写响应，后台继续，结果由同键后续请求读取。
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) internalModels(w http.ResponseWriter, r *http.Request) {
@@ -408,4 +427,35 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// internalRequestStatus 返回幂等键对应的请求状态；不等待、不触发模型调用。
+// 主服务据此判断在途请求是「仍在处理」「已完成」还是「结果未知」。
+func (s *Server) internalRequestStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceToken(w, r) {
+		return
+	}
+	key := strings.TrimSpace(r.PathValue("key"))
+	if key == "" || len(key) > 200 {
+		writeErrorV2(w, http.StatusBadRequest, "idempotency_invalid", "Idempotency-Key 无效", "")
+		return
+	}
+	record, err := s.store.GetRequest(r.Context(), key, "")
+	if err != nil {
+		writeErrorV2(w, http.StatusInternalServerError, "internal_error", "无法读取请求状态", "")
+		return
+	}
+	if record == nil {
+		writeErrorV2(w, http.StatusNotFound, "request_not_found", "没有该请求记录", "")
+		return
+	}
+	payload := map[string]any{"state": record.State, "error_code": record.ErrorCode,
+		"created_at": record.CreatedAt.UTC()}
+	if record.State == "completed" && len(record.Response) > 0 {
+		var stored any
+		if err := json.Unmarshal(record.Response, &stored); err == nil {
+			payload["response"] = stored
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
