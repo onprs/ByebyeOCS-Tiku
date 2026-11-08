@@ -49,6 +49,9 @@ func (s *Service) List(ctx context.Context) ([]Offering, error) {
 	}
 	for i := range items {
 		items[i].Health = s.health(items[i].ProviderRef, overrides)
+		if model := s.models.Model(items[i].ProviderRef); model != nil {
+			items[i].MaxOutputTokens = model.EffectiveMaxOutputTokens(s.cfg.Limits.MaxOutputTokens)
+		}
 	}
 	return items, nil
 }
@@ -63,6 +66,9 @@ func (s *Service) Get(ctx context.Context, publicID string) (*Offering, error) {
 		return nil, err
 	}
 	item.Health = s.health(item.ProviderRef, overrides)
+	if model := s.models.Model(item.ProviderRef); model != nil {
+		item.MaxOutputTokens = model.EffectiveMaxOutputTokens(s.cfg.Limits.MaxOutputTokens)
+	}
 	return item, nil
 }
 

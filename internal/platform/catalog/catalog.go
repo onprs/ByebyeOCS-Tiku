@@ -143,22 +143,23 @@ var capabilityOrder = []string{"text", "vision"}
 // Offering 是题库发布的公开模型条目。ID 由题库生成并保持稳定，
 // 主平台以它作为查询记录的关联键。
 type Offering struct {
-	ID           string      `json:"id"`
-	PublicID     string      `json:"public_id"`
-	DisplayName  string      `json:"display_name"`
-	Description  string      `json:"description"`
-	ProviderRef  string      `json:"provider_ref"`
-	Capabilities []string    `json:"capabilities"`
-	Pricing      *Pricing    `json:"pricing"`
-	PriceVersion string      `json:"price_version"`
-	CachePolicy  CachePolicy `json:"cache_policy"`
-	Enabled      bool        `json:"enabled"`
-	Default      bool        `json:"is_default"`
-	SortOrder    int         `json:"sort_order"`
-	Health       string      `json:"health"`
-	Version      int64       `json:"version"`
-	CreatedAt    time.Time   `json:"created_at"`
-	UpdatedAt    time.Time   `json:"updated_at"`
+	ID              string      `json:"id"`
+	PublicID        string      `json:"public_id"`
+	DisplayName     string      `json:"display_name"`
+	Description     string      `json:"description"`
+	ProviderRef     string      `json:"provider_ref"`
+	Capabilities    []string    `json:"capabilities"`
+	MaxOutputTokens int         `json:"max_output_tokens"`
+	Pricing         *Pricing    `json:"pricing"`
+	PriceVersion    string      `json:"price_version"`
+	CachePolicy     CachePolicy `json:"cache_policy"`
+	Enabled         bool        `json:"enabled"`
+	Default         bool        `json:"is_default"`
+	SortOrder       int         `json:"sort_order"`
+	Health          string      `json:"health"`
+	Version         int64       `json:"version"`
+	CreatedAt       time.Time   `json:"created_at"`
+	UpdatedAt       time.Time   `json:"updated_at"`
 }
 
 // ModelProfile 是校验公开能力时需要的模型事实。

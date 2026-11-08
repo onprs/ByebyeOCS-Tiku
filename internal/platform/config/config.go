@@ -27,7 +27,7 @@ const (
 	DefaultMaxImages               = 8
 	DefaultMaxImageBytes           = 5 << 20
 	DefaultMaxImagePixels          = 16000000
-	DefaultMaxOutputTokens         = 2048
+	DefaultMaxOutputTokens         = 32768
 	DefaultConcurrency             = 2
 	DefaultTimeout                 = 90 * time.Second
 	DefaultCacheTTLDays            = 7

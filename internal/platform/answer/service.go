@@ -408,7 +408,7 @@ func (s *Service) validate(req Request) (*config.Model, normalize.Question, stri
 			fmt.Sprintf("输出预算不能超过 %d", s.cfg.Limits.MaxOutputTokens), 422, false)
 	}
 	scopeHash := normalize.ScopeKeyHash(req.CacheScope, req.CacheScopeKey)
-	key := normalize.CacheKey(model.ID, s.cfg.PromptVersion, s.cfg.NormalizationVersion,
+	key := normalize.CacheKey(model.ID, s.cfg.PromptVersion, s.answerNormalizationVersion(),
 		req.CacheScope, scopeHash, req.Question.Title, req.Question.Options, prepared.Type, prepared.Images)
 	if req.CachePolicy != nil {
 		// 不同保留期分开缓存；新策略不会复用旧策略留下的长有效期条目。
@@ -502,7 +502,7 @@ func (s *Service) execute(ctx context.Context, req Request, model *config.Model,
 		// 缓存只是优化：写入失败不能让已成功的模型作答失败或丢失幂等结果。
 		_, _, _ = s.store.PutCache(persistCtx, store.CacheEntry{
 			ID: store.NewUUID(), CacheKey: cacheKey, OfferingID: model.ID,
-			PromptVersion: s.cfg.PromptVersion, NormalizationVersion: s.cfg.NormalizationVersion,
+			PromptVersion: s.cfg.PromptVersion, NormalizationVersion: s.answerNormalizationVersion(),
 			Scope: req.CacheScope, ScopeKeyHash: scopeHash,
 			QuestionTitle: prepared.TitleText, QuestionOptions: normalize.CanonicalOptions(prepared.Options),
 			QuestionType: prepared.Type, ImagesDigest: normalize.ImagesDigest(prepared.Images),
@@ -570,11 +570,16 @@ func (s *Service) solve(ctx context.Context, model *config.Model, modelKey strin
 		usage.InputTokens, usage.OutputTokens, usage.TotalTokens, usage.CacheReadTokens, usage.CacheWriteTokens = sumUsage(calls)
 		usage.Complete = usage.InputTokens != nil && usage.OutputTokens != nil && usage.TotalTokens != nil
 	}
-	answer := ExtractAnswer(result.Content, result.Reasoning, q.Type)
+	answer := extractSubmissionAnswer(result.Content, result.Reasoning, q.Type)
 	if strings.TrimSpace(answer) == "" {
 		return "", usage, newError("empty_answer", "模型未返回可提交的答案", 502, true)
 	}
 	return answer, usage, nil
+}
+
+// 答案提取规则变化后使用独立缓存版本，旧的截断答案不再用于新查询。
+func (s *Service) answerNormalizationVersion() string {
+	return s.cfg.NormalizationVersion + "/choice-text-v2"
 }
 
 func pickImages(images []normalize.Image, vision bool) []normalize.Image {

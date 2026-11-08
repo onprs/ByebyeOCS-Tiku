@@ -135,6 +135,9 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if mode == "empty" {
 		content = ""
 	}
+	if mode == "choice_word" {
+		content = "<answer>WHO</answer>"
+	}
 	response := map[string]any{
 		"choices": []any{map[string]any{"message": map[string]any{"content": content}}},
 	}
